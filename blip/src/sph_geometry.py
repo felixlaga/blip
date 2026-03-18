@@ -1,5 +1,14 @@
 import numpy as np
-from scipy.special import sph_harm
+try:
+    from scipy.special import sph_harm
+except ImportError:
+    from scipy.special import sph_harm_y
+    
+    def sph_harm(m, n, theta, phi):
+        '''
+        Compatibility wrapper for SciPy versions that expose sph_harm_y instead of sph_harm.
+        '''
+        return sph_harm_y(n, m, phi, theta)
 import numpy.linalg as LA
 import healpy as hp
 from blip.src.clebschGordan import clebschGordan
@@ -281,5 +290,4 @@ class sph_geometry(clebschGordan):
                                     [np.conj(RAT), np.conj(RET), RTT] ])
 
         return aet_response_mat
-
 

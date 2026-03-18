@@ -1,19 +1,90 @@
 import sys, os
 sys.path.append(os.getcwd()) ## this lets python find src
 import numpy as np
+import pandas as pd
 import matplotlib
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerTuple
-from chainconsumer import ChainConsumer
+try:
+    from chainconsumer import ChainConsumer
+    from chainconsumer.chain import Chain
+    from chainconsumer.plotting.config import PlotConfig
+    from chainconsumer.statistics import SummaryStatistic
+    from chainconsumer.truth import Truth
+except ImportError:
+    ChainConsumer = None
+    Chain = None
+    PlotConfig = None
+    SummaryStatistic = None
+    Truth = None
 import healpy as hp
 from healpy import Alm
 from astropy import units as u
 import pickle, argparse
 import logging
 matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+
+
+def simple_interval(samples):
+    '''
+    Return the 95% central interval and median for a 1D posterior sample.
+    '''
+    return np.quantile(samples,0.025), np.median(samples), np.quantile(samples,0.975)
+
+
+def build_chainconsumer_chain(post, parameters, name='Posterior'):
+    '''
+    Build a ChainConsumer chain from posterior samples using BLIP's default
+    styling and a 95% max-central summary interval.
+    '''
+    samples = pd.DataFrame(post, columns=parameters)
+    return Chain(samples=samples, name=name, smooth=False, kde=False,
+                 statistics=SummaryStatistic.MAX_CENTRAL, summary_area=0.95,
+                 sigmas=[1, 2], plot_cloud=False, bins=40)
+
+
+def format_bound_title(parameter, bound):
+    '''
+    Format a posterior summary label for diagonal corner-plot axes.
+    '''
+    label_base = parameter[:-1] if parameter.endswith('$') else parameter
+    label_suffix = '$' if parameter.endswith('$') else ''
+
+    if bound.lower is None or bound.upper is None:
+        center = bound.center
+        if np.abs(center) <= 1e-3:
+            center_form = '{0:.3e}'.format(center)
+        else:
+            center_form = '{0:.3f}'.format(center)
+        return label_base + ' = ' + center_form + label_suffix
+
+    err = [bound.upper - bound.center, bound.center - bound.lower]
+
+    if np.abs(bound.center) <= 1e-3:
+        mean_def = '{0:.3e}'.format(bound.center)
+        eidx = mean_def.find('e')
+        base = float(mean_def[0:eidx])
+        exponent = int(mean_def[eidx+1:])
+        mean_form = str(base)
+        exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
+    else:
+        mean_form = '{0:.3f}'.format(bound.center)
+        exp_form = ''
+
+    if np.abs(err[0]) <= 1e-2:
+        err[0] = '{0:.4f}'.format(err[0])
+    else:
+        err[0] = '{0:.2f}'.format(err[0])
+
+    if np.abs(err[1]) <= 1e-2:
+        err[1] = '{0:.4f}'.format(err[1])
+    else:
+        err[1] = '{0:.2f}'.format(err[1])
+
+    return label_base + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}' + exp_form + label_suffix
 
 
 def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None, post_map_kwargs={}, med_map_kwargs={}):
@@ -491,21 +562,71 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
 
     if params['out_dir'][-1] != '/':
         params['out_dir'] = params['out_dir'] + '/'
+    
+    if ChainConsumer is None:
+        print("ChainConsumer is not installed. Falling back to a basic matplotlib corner plot.")
+        fig, axes = plt.subplots(npar, npar, figsize=(4*npar, 4*npar))
+        axes = np.atleast_2d(axes)
+        
+        for ii in range(npar):
+            for jj in range(npar):
+                ax = axes[ii, jj]
+                
+                if jj > ii:
+                    ax.axis('off')
+                    continue
+                
+                if ii == jj:
+                    ax.hist(post[:, ii], bins=40, color='slateblue', alpha=0.7)
+                    if knowTrue and all_parameters[ii] in truevals:
+                        ax.axvline(truevals[all_parameters[ii]], color='g', ls='--', alpha=0.7)
+                    qlo, qmed, qhi = simple_interval(post[:, ii])
+                    err_hi = qhi - qmed
+                    err_lo = qmed - qlo
+                    ax.set_title(all_parameters[ii][:-1] + ' = {:.3g}^{{+{:.2g}}}_{{-{:.2g}}}$'.format(qmed, err_hi, err_lo),
+                                 fontsize=12, loc='left')
+                else:
+                    ax.scatter(post[:, jj], post[:, ii], s=2, alpha=0.08, color='slateblue', rasterized=True)
+                    if knowTrue:
+                        if all_parameters[jj] in truevals:
+                            ax.axvline(truevals[all_parameters[jj]], color='g', ls='--', alpha=0.4)
+                        if all_parameters[ii] in truevals:
+                            ax.axhline(truevals[all_parameters[ii]], color='g', ls='--', alpha=0.4)
+                
+                if ii == npar - 1:
+                    ax.set_xlabel(all_parameters[jj], fontsize=12)
+                else:
+                    ax.set_xticklabels([])
+                
+                if jj == 0 and ii > 0:
+                    ax.set_ylabel(all_parameters[ii], fontsize=12)
+                elif jj > 0:
+                    ax.set_yticklabels([])
+        
+        plt.tight_layout()
+        if saveto is not None:
+            plt.savefig(saveto + 'corners.png', dpi=200)
+        else:
+            plt.savefig(params['out_dir'] + 'corners.png', dpi=200)
+        print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
+        plt.close()
+        
+        if not params['load_data']:
+            print("ChainConsumer is not installed. Skipping walker plot generation.")
+        return
         
     ## Make chainconsumer corner plots
     cc = ChainConsumer()
-    cc.add_chain(post, parameters=all_parameters)
-    cc.configure(smooth=False, kde=False, max_ticks=2, sigmas=np.array([1, 2]), label_font_size=18, tick_font_size=18, \
-            summary=False, statistics="max_central", spacing=2, summary_area=0.95, cloud=False, bins=1.2)
-    cc.configure_truth(color='g', ls='--', alpha=0.7)
-
+    cc.add_chain(build_chainconsumer_chain(post, all_parameters))
+    cc.set_plot_config(PlotConfig(max_ticks=2, label_font_size=18, tick_font_size=18,
+                                  spacing=2, summarise=False, dpi=200))
     if knowTrue:
-        fig = cc.plotter.plot(figsize=(16, 16), truth=truevals)
-    else:
-        fig = cc.plotter.plot(figsize=(16, 16))
+        cc.add_truth(Truth(location=truevals, color='g', line_style='--', alpha=0.7))
+
+    fig = cc.plotter.plot(figsize=(16, 16))
 
     ## make axis labels to be parameter summaries
-    sum_data = cc.analysis.get_summary()
+    sum_data = cc.analysis.get_summary()['Posterior']
     axes = np.array(fig.axes).reshape((npar, npar))
 
     # Adjust axis labels
@@ -513,48 +634,23 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         ax = axes[ii, ii]
 
         # get the right summary for the parameter ii
-        sum_ax = sum_data[all_parameters[ii]]
-        err =  [sum_ax[2] - sum_ax[1], sum_ax[1]- sum_ax[0]]
-
-        if np.abs(sum_ax[1]) <= 1e-3:
-            mean_def = '{0:.3e}'.format(sum_ax[1])
-            eidx = mean_def.find('e')
-            base = float(mean_def[0:eidx])
-            exponent = int(mean_def[eidx+1:])
-            mean_form = str(base)
-            exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
-        else:
-            mean_form = '{0:.3f}'.format(sum_ax[1])
-            exp_form = ''
-
-        if np.abs(err[0]) <= 1e-2:
-            err[0] = '{0:.4f}'.format(err[0])
-        else:
-            err[0] = '{0:.2f}'.format(err[0])
-
-        if np.abs(err[1]) <= 1e-2:
-            err[1] = '{0:.4f}'.format(err[1])
-        else:
-            err[1] = '{0:.2f}'.format(err[1])
-
-        label =  all_parameters[ii][:-1] + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}'+exp_form+'$'
-
+        label = format_bound_title(all_parameters[ii], sum_data[all_parameters[ii]])
         ax.set_title(label, {'fontsize':18}, loc='left')
 
 
     ## Save posterior
     if saveto is not None:
-        plt.savefig(saveto + 'corners.png', dpi=200)
+        fig.savefig(saveto + 'corners.png', dpi=200)
     else:
-        plt.savefig(params['out_dir'] + 'corners.png', dpi=200)
+        fig.savefig(params['out_dir'] + 'corners.png', dpi=200)
     print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
-    plt.close()
+    plt.close(fig)
     
     if not params['load_data']:    
         # plot walkers
-        fig = cc.plotter.plot_walks(truth=truevals, convolve=10)
-        plt.savefig(params['out_dir'] + 'plotwalks.png', dpi=200)
-        plt.close()
+        fig = cc.plotter.plot_walks(convolve=10)
+        fig.savefig(params['out_dir'] + 'plotwalks.png', dpi=200)
+        plt.close(fig)
 
 
 if __name__ == '__main__':
@@ -601,4 +697,3 @@ if __name__ == '__main__':
             mapmaker(post, params, parameters, Model, coord=params['healpy_proj'])
         else:
             mapmaker(post, params, parameters, Model)
-

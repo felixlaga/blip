@@ -14,6 +14,20 @@ import matplotlib.pyplot as plt
 from multiprocessing import Pool
 import time
 
+def parse_prior_bounds(config,option,default):
+    '''
+    Parse a two-element prior interval from the optional [priors] section.
+    '''
+    if config.has_section('priors') and config.has_option('priors', option):
+        bounds = eval(str(config.get('priors', option)))
+    else:
+        bounds = default
+    if len(bounds) != 2:
+        raise ValueError("Prior '{}' must have exactly two bounds.".format(option))
+    bounds = [float(bounds[0]), float(bounds[1])]
+    bounds.sort()
+    return bounds
+
 class LISA(LISAdata, Model):
 
     '''
@@ -377,7 +391,18 @@ def blip(paramsfile='params.ini',resume=False):
     params['lisa_config'] = str(config.get("params", "lisa_config", fallback='orbiting'))
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
+    params['multipole_l'] = int(config.get("params", "multipole_l", fallback=-1))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
+    params['prior_bounds'] = {'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
+                              'log_Na':parse_prior_bounds(config,'log_Na',[-51,-46]),
+                              'alpha':parse_prior_bounds(config,'alpha',[-5,5]),
+                              'log_omega0':parse_prior_bounds(config,'log_omega0',[-14,8]),
+                              'log_A_L':parse_prior_bounds(config,'log_A_L',[-14,8]),
+                              'alpha1':parse_prior_bounds(config,'alpha1',[-4,6]),
+                              'alpha2':parse_prior_bounds(config,'alpha2',[0,40]),
+                              'log_fbreak':parse_prior_bounds(config,'log_fbreak',[-4,-2]),
+                              'log_fcut':parse_prior_bounds(config,'log_fcut',[-4,-2]),
+                              'log_fscale':parse_prior_bounds(config,'log_fscale',[-4,-2])}
 
     ## see if we need to initialize the spherical harmonic subroutines
     sph_check = [sublist.split('-')[0].split('_')[-1] for sublist in params['model'].split('+')]
@@ -387,6 +412,7 @@ def blip(paramsfile='params.ini',resume=False):
     
     if inj['doInj']:
         inj['injection'] = str(config.get("inj", "injection"))
+        inj['multipole_l'] = int(config.get("inj", "multipole_l", fallback=params['multipole_l']))
         
         ## get the injection truevals, passed as a dict
         truevals = eval(str(config.get("inj","truevals")))
@@ -399,7 +425,7 @@ def blip(paramsfile='params.ini',resume=False):
         ## build the truevals dict
         ## some quantities we want to use as log values, so convert them
         inj['truevals'] = {}
-        log_list = ["Np","Na","omega0","fbreak","fcut","fscale"]
+        log_list = ["Np","Na","omega0","A_L","fbreak","fcut","fscale"]
         for component_name in truevals.keys():
             inj['truevals'][component_name] = {}
             for name in truevals[component_name].keys():
@@ -410,24 +436,25 @@ def blip(paramsfile='params.ini',resume=False):
                     inj['truevals'][component_name][name] = truevals[component_name][name]
         ## add injections to the spherical harmonic check if needed
         sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
-        
+    
     ## set sph flags
-    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check)
+    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check)
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     
     if inj['sph_flag']:
+        default_inj_lmax = max(params['lmax'], params.get('multipole_l', -1), inj.get('multipole_l', -1))
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
         except configparser.NoOptionError as err:
             if params['sph_flag']:
-                print("Performing a spherical harmonic basis injection and inj_lmax has not been specified. Injection and recovery will use same lmax (lmax={}).".format(params['lmax']))
-                inj['inj_lmax'] = params['lmax']
+                print("Performing a spherical harmonic basis injection and inj_lmax has not been specified. Injection and recovery will use same lmax (lmax={}).".format(default_inj_lmax))
+                inj['inj_lmax'] = default_inj_lmax
             else:
                 print("You are trying to do a spherical harmonic injection, but have not specified lmax.")
                 if 'lmax' in params.keys():
                     print("Warning: using analysis lmax parameter for inj_lmax, but you are not performing a spherical harmonic analysis.")
-                    inj['inj_lmax'] = params['lmax']
+                    inj['inj_lmax'] = default_inj_lmax
                 else:
                     raise err
     

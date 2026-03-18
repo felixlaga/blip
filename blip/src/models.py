@@ -7,9 +7,13 @@ from blip.src.utils import log_manager, catch_duplicates, gen_suffixes, catch_co
 from blip.src.geometry import geometry
 from blip.src.sph_geometry import sph_geometry
 from blip.src.clebschGordan import clebschGordan
-from blip.src.astro import Population
 from blip.src.instrNoise import instrNoise
-import blip.src.astro as astro
+try:
+    from blip.src.astro import Population
+    import blip.src.astro as astro
+except ImportError:
+    Population = None
+    astro = None
 
 
 
@@ -138,14 +142,22 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         ## assignment of spectrum
         if self.spectral_model_name == 'powerlaw':
-            self.spectral_parameters = self.spectral_parameters + [r'$\alpha$', r'$\log_{10} (\Omega_0)$']
+            if self.spatial_model_name == 'multipole':
+                amplitude_parameter = self.get_single_multipole_amplitude_parameter()
+                self.powerlaw_amplitude_prior_key = 'log_A_L'
+                self.powerlaw_amplitude_trueval_key = 'log_A_L'
+            else:
+                amplitude_parameter = r'$\log_{10} (\Omega_0)$'
+                self.powerlaw_amplitude_prior_key = 'log_omega0'
+                self.powerlaw_amplitude_trueval_key = 'log_omega0'
+            self.spectral_parameters = self.spectral_parameters + [r'$\alpha$', amplitude_parameter]
             self.omegaf = self.powerlaw_spectrum
             self.fancyname = "Power Law"+submodel_count
             if not injection:
                 self.spectral_prior = self.powerlaw_prior
             else:
                 self.truevals[r'$\alpha$'] = self.injvals['alpha']
-                self.truevals[r'$\log_{10} (\Omega_0)$'] = self.injvals['log_omega0']
+                self.truevals[amplitude_parameter] = self.injvals[self.powerlaw_amplitude_trueval_key]
         elif self.spectral_model_name == 'brokenpowerlaw':
             self.spectral_parameters = self.spectral_parameters + [r'$\alpha_1$',r'$\log_{10} (\Omega_0)$',r'$\alpha_2$',r'$\log_{10} (f_{break})$']
             self.omegaf = self.broken_powerlaw_spectrum
@@ -172,6 +184,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         elif self.spectral_model_name == 'population':
             if not injection:
                 raise ValueError("Populations are injection-only.")
+            if Population is None:
+                raise ImportError("Population injections require the optional astrophysical dependencies (including legwork).")
             self.fancyname = "DWD Population"+submodel_count
             self.population = Population(self.params,self.inj,self.fs)
             self.compute_Sgw = self.population.Sgw_wrapper
@@ -270,12 +284,45 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 ## create a wrapper b/c isotropic and anisotropic injection responses are different
                 self.inj_response_mat = self.summ_response_mat
         
+        ## This mode keeps one chosen multipole L and marginalizes over its m-modes internally.
+        ## It infers only Np, Na, alpha, and log10(A_L), with no free b_lm coefficients and no sky reconstruction.
+        elif self.spatial_model_name == 'multipole':
+            self.multipole_l = self.get_selected_multipole_l()
+            response_kwargs['set_almax'] = self.multipole_l
+            
+            if self.params['tdi_lev']=='michelson':
+                self.response = self.asgwb_mich_response
+            elif self.params['tdi_lev']=='xyz':
+                self.response = self.asgwb_xyz_response
+            elif self.params['tdi_lev']=='aet':
+                self.response = self.asgwb_aet_response
+            else:
+                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
+            
+            ## build one effective fixed-L response by summing over m in quadrature
+            multipole_response_basis = self.response(f0,tsegmid,**response_kwargs)
+            self.response_mat = self.compute_single_multipole_response(multipole_response_basis,self.multipole_l)
+            
+            ## plotting stuff
+            self.fancyname = "Single Multipole $L={}$ ".format(self.multipole_l) + self.fancyname
+            self.subscript = "_{\mathrm{L=" + str(self.multipole_l) + "}}"
+            self.color = 'royalblue'
+            self.has_map = False
+            
+            if not injection:
+                self.prior = self.isotropic_prior
+                self.cov = self.compute_cov_isgwb
+            else:
+                self.inj_response_mat = self.response_mat
+        
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
             
             ## the astrophysical spatial models are generally injection-only
             if not injection:
                 raise ValueError("This model is injection-only.")
+            if astro is None:
+                raise ImportError("Astrophysical sky injections require the optional astrophysical dependencies (including legwork).")
             
             self.has_map = True
             
@@ -469,6 +516,74 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Sgw = Omegaf*(3/(4*fs**3))*(H0/np.pi)**2
         return Sgw
     
+    def get_prior_bounds(self,prior_key,default_bounds):
+        '''
+        Return the configured [min, max] bounds for a named prior, falling back to legacy defaults.
+        '''
+        bounds = self.params.get('prior_bounds',{}).get(prior_key,default_bounds)
+        bounds = np.asarray(bounds,dtype=float)
+        if bounds.shape != (2,):
+            raise ValueError("Prior '{}' must have exactly two bounds.".format(prior_key))
+        bounds.sort()
+        return bounds
+    
+    def rescale_uniform_prior(self,unit_theta,prior_key,default_bounds):
+        '''
+        Rescale unit-cube draws onto a configured uniform prior interval.
+        '''
+        lower, upper = self.get_prior_bounds(prior_key,default_bounds)
+        return lower + (upper-lower)*np.asarray(unit_theta)
+    
+    def get_selected_multipole_l(self):
+        '''
+        Return the fixed multipole L for the single-multipole total-power mode.
+        '''
+        if self.injection:
+            multipole_l = self.inj.get('multipole_l', self.params.get('multipole_l', -1))
+        else:
+            multipole_l = self.params.get('multipole_l', -1)
+        
+        multipole_l = int(multipole_l)
+        if multipole_l < 1:
+            raise ValueError("The single-multipole total-power mode requires 'multipole_l' >= 1 in the ini file.")
+        
+        return multipole_l
+    
+    def get_single_multipole_amplitude_parameter(self):
+        '''
+        Parameter label for the single-multipole total-power amplitude.
+        '''
+        return r'$\log_{10} (A_{' + str(self.get_selected_multipole_l()) + '})$'
+    
+    def get_single_multipole_indices(self,multipole_l):
+        '''
+        Return the response-basis indices corresponding to the chosen multipole L and all of its m-modes.
+        '''
+        return [ii for ii in range((multipole_l + 1)**2) if self.idxtoalm(multipole_l, ii)[0] == multipole_l]
+    
+    def compute_single_multipole_response(self,response_basis_mat,multipole_l):
+        '''
+        Build an effective covariance response for the total power in one fixed multipole.
+        
+        This first-pass mode does not infer individual m-modes. Instead, it assumes the 2L+1 modes at fixed L
+        contribute with equal statistical weight and combines their response matrices in quadrature. We then
+        take the positive matrix square root of that Gram matrix so the effective response scales like an
+        RMS-over-m response rather than the square of the detector response.
+        '''
+        multipole_indices = self.get_single_multipole_indices(multipole_l)
+        multipole_response = response_basis_mat[:, :, :, :, multipole_indices]
+        effective_response_sq = np.einsum('ikftm,jkftm->ijft', multipole_response, np.conj(multipole_response))
+        effective_response_sq = effective_response_sq / len(multipole_indices)
+        effective_response_sq = 0.5 * (effective_response_sq + np.swapaxes(np.conj(effective_response_sq), 0, 1))
+        
+        ## take the Hermitian matrix square root for each frequency/time bin
+        effective_response_sq = np.moveaxis(effective_response_sq, [2, 3], [0, 1])
+        eigvals, eigvecs = np.linalg.eigh(effective_response_sq)
+        eigvals = np.clip(eigvals, 0, None)
+        effective_response = np.einsum('...ik,...k,...jk->...ij', eigvecs, np.sqrt(eigvals), np.conj(eigvecs))
+        
+        return np.moveaxis(effective_response, [0, 1], [2, 3])
+    
     #############################
     ##          Priors         ##
     #############################
@@ -585,8 +700,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         log_Np, log_Na = theta
 
         # Transform to actual priors
-        log_Np = -5*log_Np - 39
-        log_Na = -5*log_Na - 46
+        log_Np = self.rescale_uniform_prior(log_Np,'log_Np',[-44,-39])
+        log_Na = self.rescale_uniform_prior(log_Na,'log_Na',[-51,-46])
 
         return [log_Np, log_Na]
     
@@ -613,10 +728,10 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         # Unpack: Theta is defined in the unit cube
         # Transform to actual priors
-        alpha       =  10*theta[0] - 5
-        log_omega0  = -22*theta[1] + 8
+        alpha = self.rescale_uniform_prior(theta[0],'alpha',[-5,5])
+        log_amplitude = self.rescale_uniform_prior(theta[1],getattr(self,'powerlaw_amplitude_prior_key','log_omega0'),[-14,8])
         
-        return [alpha, log_omega0]
+        return [alpha, log_amplitude]
     
     def broken_powerlaw_prior(self,theta):
 
@@ -640,10 +755,10 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         # Unpack: Theta is defined in the unit cube
         # Transform to actual priors
-        alpha_1 = 10*theta[0] - 4
-        log_omega0 = -22*theta[1] + 8
-        alpha_2 = 40*theta[2]
-        log_fbreak = -2*theta[3] - 2
+        alpha_1 = self.rescale_uniform_prior(theta[0],'alpha1',[-4,6])
+        log_omega0 = self.rescale_uniform_prior(theta[1],'log_omega0',[-14,8])
+        alpha_2 = self.rescale_uniform_prior(theta[2],'alpha2',[0,40])
+        log_fbreak = self.rescale_uniform_prior(theta[3],'log_fbreak',[-4,-2])
 
         return [alpha_1, log_omega0, alpha_2, log_fbreak]
     
@@ -669,10 +784,10 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         # Unpack: Theta is defined in the unit cube
         # Transform to actual priors
-        alpha = 10*theta[0] - 5
-        log_omega0 = -22*theta[1] + 8
-        log_fcut = -2*theta[2] - 2
-        log_fscale = -2*theta[3] - 2
+        alpha = self.rescale_uniform_prior(theta[0],'alpha',[-5,5])
+        log_omega0 = self.rescale_uniform_prior(theta[1],'log_omega0',[-14,8])
+        log_fcut = self.rescale_uniform_prior(theta[2],'log_fcut',[-4,-2])
+        log_fscale = self.rescale_uniform_prior(theta[3],'log_fscale',[-4,-2])
         
 
         return [alpha, log_omega0, log_fcut, log_fscale]
@@ -811,6 +926,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         skymap (healpy array) : pixel-basis astrophysical skymap
         
         '''
+        if astro is None:
+            raise ImportError("Astrophysical sky injections require the optional astrophysical dependencies (including legwork).")
         ## transform to blms
         self.astro_blms = astro.skymap_pix2sph(skymap,self.lmax)
         ## get corresponding truevals

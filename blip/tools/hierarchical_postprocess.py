@@ -1,16 +1,60 @@
 import sys, os
 sys.path.append(os.getcwd()) ## this lets python find src
 import numpy as np
+import pandas as pd
 import matplotlib
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from chainconsumer import ChainConsumer
+from chainconsumer.chain import Chain
+from chainconsumer.plotting.config import PlotConfig
+from chainconsumer.statistics import SummaryStatistic
+from chainconsumer.truth import Truth
 #import healpy as hp
 #from healpy import Alm
 import pickle, argparse
 #import logging
 from src.hierarchical import postprocess
 matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+
+
+def format_bound_title(parameter, bound):
+    '''
+    Format a posterior summary label for diagonal corner-plot axes.
+    '''
+    label_base = parameter[:-1] if parameter.endswith('$') else parameter
+    label_suffix = '$' if parameter.endswith('$') else ''
+
+    if bound.lower is None or bound.upper is None:
+        center = bound.center
+        if np.abs(center) <= 1e-3:
+            center_form = '{0:.3e}'.format(center)
+        else:
+            center_form = '{0:.3f}'.format(center)
+        return label_base + ' = ' + center_form + label_suffix
+
+    err = [bound.upper - bound.center, bound.center - bound.lower]
+
+    if np.abs(bound.center) <= 1e-3:
+        mean_def = '{0:.3e}'.format(bound.center)
+        eidx = mean_def.find('e')
+        base = float(mean_def[0:eidx])
+        exponent = int(mean_def[eidx+1:])
+        mean_form = str(base) + ' \\times ' + '10^{' + str(exponent) + '}'
+    else:
+        mean_form = '{0:.3f}'.format(bound.center)
+
+    if np.abs(err[0]) <= 1e-2:
+        err[0] = '{0:.4f}'.format(err[0])
+    else:
+        err[0] = '{0:.2f}'.format(err[0])
+
+    if np.abs(err[1]) <= 1e-2:
+        err[1] = '{0:.4f}'.format(err[1])
+    else:
+        err[1] = '{0:.2f}'.format(err[1])
+
+    return label_base + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}' + label_suffix
 
 if __name__ == '__main__':
 
@@ -54,18 +98,19 @@ if __name__ == '__main__':
     else:
         raise TypeError("Unknown model. Currently supported models: 'breivik2020'.")
     cc = ChainConsumer()
-    cc.add_chain(chain, parameters=post_parameters)
-    cc.configure(smooth=False, kde=False, max_ticks=2, sigmas=np.array([1, 2]), label_font_size=18, tick_font_size=18, \
-            summary=False, statistics="max_central", spacing=2, summary_area=0.95, cloud=False, bins=1.2)
-    cc.configure_truth(color='g', ls='--', alpha=0.7)
-
+    cc.add_chain(Chain(samples=pd.DataFrame(chain, columns=post_parameters), name='Posterior',
+                       smooth=False, kde=False, statistics=SummaryStatistic.MAX_CENTRAL,
+                       summary_area=0.95, sigmas=[1, 2], plot_cloud=False, bins=40))
+    cc.set_plot_config(PlotConfig(max_ticks=2, label_font_size=18, tick_font_size=18,
+                                  spacing=2, summarise=False, dpi=150))
     if knowTrue:
-        fig = cc.plotter.plot(figsize=(16, 16), truth=truevals)
-    else:
-        fig = cc.plotter.plot(figsize=(16, 16))
+        cc.add_truth(Truth(location=dict(zip(post_parameters, truevals)), color='g',
+                           line_style='--', alpha=0.7))
+
+    fig = cc.plotter.plot(figsize=(16, 16))
 
     ## make axis labels to be parameter summaries
-    sum_data = cc.analysis.get_summary()
+    sum_data = cc.analysis.get_summary()['Posterior']
     axes = np.array(fig.axes).reshape((npar, npar))
 
     # Adjust axis labels
@@ -73,45 +118,21 @@ if __name__ == '__main__':
         ax = axes[ii, ii]
 
         # get the right summary for the parameter ii
-        sum_ax = sum_data[post_parameters[ii]]
-        err =  [sum_ax[2] - sum_ax[1], sum_ax[1]- sum_ax[0]]
-
-        if np.abs(sum_ax[1]) <= 1e-3:
-            mean_def = '{0:.3e}'.format(sum_ax[1])
-            eidx = mean_def.find('e')
-            base = float(mean_def[0:eidx])
-            exponent = int(mean_def[eidx+1:])
-            mean_form = str(base) + ' \\times ' + '10^{' + str(exponent) + '} '
-        else:
-            mean_form = '{0:.3f}'.format(sum_ax[1])
-
-        if np.abs(err[0]) <= 1e-2:
-            err[0] = '{0:.4f}'.format(err[0])
-        else:
-            err[0] = '{0:.2f}'.format(err[0])
-
-        if np.abs(err[1]) <= 1e-2:
-            err[1] = '{0:.4f}'.format(err[1])
-        else:
-            err[1] = '{0:.2f}'.format(err[1])
-
-        label =  post_parameters[ii][:-1] + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}$'
-
+        label = format_bound_title(post_parameters[ii], sum_data[post_parameters[ii]])
         ax.set_title(label, {'fontsize':18}, loc='left')
 
     ## save
     if args.outdir is None:
-        plt.savefig(args.rundir  + '/postproc_corners.png', dpi=150)
+        fig.savefig(args.rundir  + '/postproc_corners.png', dpi=150)
         print("Posteriors plots printed in " + args.rundir + "/postproc_corners.png")
-        plt.close()
+        plt.close(fig)
         np.savetxt(args.rundir+'/postprocessing_samples.txt',chain)
     else:
-        plt.savefig(args.outdir  + '/postproc_corners.png', dpi=150)
+        fig.savefig(args.outdir  + '/postproc_corners.png', dpi=150)
         print("Posteriors plots printed in " + args.outdir + "/postproc_corners.png")
-        plt.close()
+        plt.close(fig)
         np.savetxt(args.outdir+'/postprocessing_samples.txt',chain)
     
-
 
 
 

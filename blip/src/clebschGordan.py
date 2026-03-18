@@ -1,6 +1,9 @@
 import numpy as np
 from healpy import Alm
-from sympy.physics.quantum.cg import CG
+try:
+    from sympy.physics.quantum.cg import CG
+except ImportError:
+    CG = None
 
 
 class clebschGordan():
@@ -21,7 +24,10 @@ class clebschGordan():
         self.blm_size = Alm.getsize(self.blmax)
 
         ## calculate and store beta
-        self.calc_beta()
+        if CG is not None:
+            self.calc_beta()
+        else:
+            self.beta_vals = None
 
         ## calculate and store the output of the idxtoalm method for blmax.
         ## This will be used many times for the spherical harmonic likelihood
@@ -65,6 +71,8 @@ class clebschGordan():
         '''
         Method to calculate beta array to convert from blm to alm
         '''
+        if CG is None:
+            raise ImportError("sympy is required for blm/alm conversions in the spherical-harmonic anisotropy mode.")
 
         ## initialize beta array
         beta_vals = np.zeros((self.alm_size, 2*self.blm_size - self.blmax - 1, 2*self.blm_size - self.blmax - 1))
@@ -118,6 +126,8 @@ class clebschGordan():
         '''
         Convert complex blm values to alm complex values. This will contain both -ve m values too in the standard order
         '''
+        if self.beta_vals is None:
+            raise ImportError("sympy is required for blm/alm conversions in the spherical-harmonic anisotropy mode.")
 #        if not (self.inj['injtype'] == 'astro' and self.inj['injbasis'] == 'sph_lmax'):
         if blms_in.size != self.blm_size:
             raise ValueError('The size of the input blm array does not match the size defined by lmax ')
