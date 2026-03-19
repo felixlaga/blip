@@ -563,26 +563,22 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
     
     def compute_single_multipole_response(self,response_basis_mat,multipole_l):
         '''
-        Build an effective covariance response for the total power in one fixed multipole.
+        Build a statistically isotropic covariance response for the total power in one fixed multipole L.
         
-        This first-pass mode does not infer individual m-modes. Instead, it assumes the 2L+1 modes at fixed L
-        contribute with equal statistical weight and combines their response matrices in quadrature. We then
-        take the positive matrix square root of that Gram matrix so the effective response scales like an
-        RMS-over-m response rather than the square of the detector response.
+        This first-pass mode handles the m-modes analytically by assuming an isotropic power distribution.
+        It computes the rotationally-invariant, effectively unpolarized Gram matrix sum_m R_m R_m^dagger 
+        normalized by 2L+1. Because R_m is dimensionless, this returns a valid positive semi-definite 
+        dimensionless response matrix ready to be scaled by the total power amplitude A_L.
         '''
         multipole_indices = self.get_single_multipole_indices(multipole_l)
         multipole_response = response_basis_mat[:, :, :, :, multipole_indices]
         effective_response_sq = np.einsum('ikftm,jkftm->ijft', multipole_response, np.conj(multipole_response))
         effective_response_sq = effective_response_sq / len(multipole_indices)
+        
+        ## Ensure Hermitian symmetry explicitly
         effective_response_sq = 0.5 * (effective_response_sq + np.swapaxes(np.conj(effective_response_sq), 0, 1))
         
-        ## take the Hermitian matrix square root for each frequency/time bin
-        effective_response_sq = np.moveaxis(effective_response_sq, [2, 3], [0, 1])
-        eigvals, eigvecs = np.linalg.eigh(effective_response_sq)
-        eigvals = np.clip(eigvals, 0, None)
-        effective_response = np.einsum('...ik,...k,...jk->...ij', eigvecs, np.sqrt(eigvals), np.conj(eigvecs))
-        
-        return np.moveaxis(effective_response, [0, 1], [2, 3])
+        return effective_response_sq
     
     #############################
     ##          Priors         ##
