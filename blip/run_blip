@@ -28,6 +28,20 @@ def parse_prior_bounds(config,option,default):
     bounds.sort()
     return bounds
 
+
+def format_prior_bounds_summary(prior_bounds):
+    '''
+    Format a compact one-line summary of parsed prior intervals.
+    '''
+    ordered_keys = ['log_Np','log_Na','alpha','log_A_L','log_omega0',
+                    'alpha1','alpha2','log_fbreak','log_fcut','log_fscale']
+    parts = []
+    for key in ordered_keys:
+        if key in prior_bounds:
+            bounds = [float(prior_bounds[key][0]), float(prior_bounds[key][1])]
+            parts.append("{}={}".format(key, bounds))
+    return ', '.join(parts)
+
 class LISA(LISAdata, Model):
 
     '''
@@ -369,7 +383,11 @@ def blip(paramsfile='params.ini',resume=False):
     inj = {}
 
     config = configparser.ConfigParser()
-    config.read(paramsfile)
+    read_files = config.read(paramsfile)
+    if len(read_files) == 0:
+        raise FileNotFoundError("Could not read BLIP config file '{}'.".format(paramsfile))
+    config_path = os.path.abspath(read_files[0])
+    print("[BLIP config] requested={}, loaded={}".format(config_path, read_files))
 
     # Params Dict
     params['fmin']     = float(config.get("params", "fmin"))
@@ -403,6 +421,8 @@ def blip(paramsfile='params.ini',resume=False):
                               'log_fbreak':parse_prior_bounds(config,'log_fbreak',[-4,-2]),
                               'log_fcut':parse_prior_bounds(config,'log_fcut',[-4,-2]),
                               'log_fscale':parse_prior_bounds(config,'log_fscale',[-4,-2])}
+    params['debug_priors'] = int(config.get("run_params", "debug_priors", fallback=0))
+    print("[BLIP priors] {}".format(format_prior_bounds_summary(params['prior_bounds'])))
 
     ## see if we need to initialize the spherical harmonic subroutines
     sph_check = [sublist.split('-')[0].split('_')[-1] for sublist in params['model'].split('+')]

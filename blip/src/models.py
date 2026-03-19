@@ -59,6 +59,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         self.time_dim = tsegmid.size
         self.name = submodel_name
         self.injection = injection
+        self._prior_debug_seen = set()
         geometry.__init__(self)
         
         ## remove the duplicate identifier if needed (powerlaw_isgwb-3 -> powerlaw_isgwb)
@@ -520,11 +521,22 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         Return the configured [min, max] bounds for a named prior, falling back to legacy defaults.
         '''
-        bounds = self.params.get('prior_bounds',{}).get(prior_key,default_bounds)
+        has_prior_bounds = 'prior_bounds' in self.params
+        prior_bounds = self.params.get('prior_bounds',{})
+        bounds = prior_bounds.get(prior_key,default_bounds)
         bounds = np.asarray(bounds,dtype=float)
         if bounds.shape != (2,):
             raise ValueError("Prior '{}' must have exactly two bounds.".format(prior_key))
         bounds.sort()
+        if self.params.get('debug_priors',0) and prior_key not in self._prior_debug_seen:
+            print("[BLIP prior lookup] key={} default={} has_prior_bounds={} available_keys={} chosen={}".format(
+                prior_key,
+                list(default_bounds),
+                has_prior_bounds,
+                sorted(list(prior_bounds.keys())) if isinstance(prior_bounds,dict) else type(prior_bounds).__name__,
+                bounds.tolist()
+            ))
+            self._prior_debug_seen.add(prior_key)
         return bounds
     
     def rescale_uniform_prior(self,unit_theta,prior_key,default_bounds):
