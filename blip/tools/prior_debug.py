@@ -25,6 +25,7 @@ def build_prior_bounds(config):
     Build BLIP's prior-bounds dictionary exactly as run_blip does.
     '''
     return {
+        'log10_Ac': parse_prior_bounds(config, 'log10_Ac', [-14, -8]),
         'log_Np': parse_prior_bounds(config, 'log_Np', [-44, -39]),
         'log_Na': parse_prior_bounds(config, 'log_Na', [-51, -46]),
         'alpha': parse_prior_bounds(config, 'alpha', [-5, 5]),
@@ -42,6 +43,8 @@ def get_powerlaw_amplitude_prior_key(model_name):
     '''
     Mirror the current model-specific amplitude-prior selection for power-law models.
     '''
+    if 'powerlaw_fixedLchannels' in model_name.split('+'):
+        return 'log10_Ac'
     if 'powerlaw_multipole' in model_name.split('+'):
         return 'log_A_L'
     return 'log_omega0'
@@ -74,7 +77,7 @@ def main():
     print("[prior_debug] parsed_prior_bounds={}".format(prior_bounds))
     print("[prior_debug] powerlaw_amplitude_prior_key={}".format(amplitude_prior_key))
 
-    for key in ['log_Np', 'log_Na', 'alpha', 'log_A_L']:
+    for key in ['log10_Ac', 'log_Np', 'log_Na', 'alpha', 'log_A_L']:
         print("[prior_debug] lookup {} -> {}".format(key, prior_bounds[key]))
 
 

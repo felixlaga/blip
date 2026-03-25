@@ -147,18 +147,29 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 amplitude_parameter = self.get_single_multipole_amplitude_parameter()
                 self.powerlaw_amplitude_prior_key = 'log_A_L'
                 self.powerlaw_amplitude_trueval_key = 'log_A_L'
+            elif self.spatial_model_name == 'fixedLchannels':
+                amplitude_parameter = r'$\log_{10} (A_c)$'
+                self.powerlaw_amplitude_prior_key = 'log10_Ac'
+                self.powerlaw_amplitude_trueval_key = 'log10_Ac'
             else:
                 amplitude_parameter = r'$\log_{10} (\Omega_0)$'
                 self.powerlaw_amplitude_prior_key = 'log_omega0'
                 self.powerlaw_amplitude_trueval_key = 'log_omega0'
-            self.spectral_parameters = self.spectral_parameters + [r'$\alpha$', amplitude_parameter]
-            self.omegaf = self.powerlaw_spectrum
+            if self.spatial_model_name == 'fixedLchannels':
+                self.spectral_parameters = self.spectral_parameters + [amplitude_parameter, r'$\alpha$']
+                self.omegaf = self.fixedL_powerlaw_signal
+            else:
+                self.spectral_parameters = self.spectral_parameters + [r'$\alpha$', amplitude_parameter]
+                self.omegaf = self.powerlaw_spectrum
             self.fancyname = "Power Law"+submodel_count
             if not injection:
-                self.spectral_prior = self.powerlaw_prior
+                if self.spatial_model_name == 'fixedLchannels':
+                    self.spectral_prior = self.fixedL_powerlaw_prior
+                else:
+                    self.spectral_prior = self.powerlaw_prior
             else:
-                self.truevals[r'$\alpha$'] = self.injvals['alpha']
                 self.truevals[amplitude_parameter] = self.injvals[self.powerlaw_amplitude_trueval_key]
+                self.truevals[r'$\alpha$'] = self.injvals['alpha']
         elif self.spectral_model_name == 'brokenpowerlaw':
             self.spectral_parameters = self.spectral_parameters + [r'$\alpha_1$',r'$\log_{10} (\Omega_0)$',r'$\alpha_2$',r'$\log_{10} (f_{break})$']
             self.omegaf = self.broken_powerlaw_spectrum
@@ -315,7 +326,43 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.cov = self.compute_cov_isgwb
             else:
                 self.inj_response_mat = self.response_mat
-        
+
+        elif self.spatial_model_name == 'fixedLchannels':
+            if self.params['tdi_lev'] != 'aet':
+                raise ValueError("The fixed-L channel likelihood currently supports only tdi_lev='aet'.")
+
+            self.fixedL = self.get_selected_fixedL()
+            response_kwargs['set_almax'] = self.fixedL
+            self.response = self.asgwb_aet_response
+            self.response_basis_mat = self.response(f0, tsegmid, **response_kwargs)
+            self.fixedL_channel_pairs = self.get_fixedL_channel_pairs()
+            self.fixedL_channel_response_segments = self.compute_fixedL_channel_response_segments(
+                self.response_basis_mat,
+                self.fixedL
+            )
+            self.fixedL_channel_response_matrix = self.assemble_fixedL_channel_response_matrix(
+                self.fixedL_channel_response_segments
+            )
+            self.fixedL_channel_response = {
+                pair: np.mean(response_segments, axis=1)
+                for pair, response_segments in self.fixedL_channel_response_segments.items()
+            }
+
+            self.fancyname = "Fixed-L Channels $L={}$ ".format(self.fixedL) + self.fancyname
+            self.subscript = "_{\mathrm{fixedL=" + str(self.fixedL) + "}}"
+            self.color = 'royalblue'
+            self.has_map = False
+
+            if not injection:
+                self.prior = self.isotropic_prior
+                self.compute_Sgw = self.fixedL_analysis_guard_compute_Sgw
+                self.cov = self.fixedL_analysis_guard_covariance
+            else:
+                ## Use the same direct per-pair fixed-L response object as the channel likelihood.
+                ## This keeps the injection conventions aligned with the analysis mode.
+                self.inj_response_mat = self.fixedL_channel_response_matrix
+                self.compute_injected_sgw = self.compute_fixedL_injected_sgw
+
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
             
@@ -516,6 +563,66 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Omegaf = self.omegaf(fs,*omegaf_args)
         Sgw = Omegaf*(3/(4*fs**3))*(H0/np.pi)**2
         return Sgw
+
+    def omega_to_sgw_factor(self, fs):
+        '''
+        Conversion factor from Omega(f) h^2 units to SGWB PSD units, using BLIP's H0 convention.
+        '''
+        H0 = 2.2*10**(-18)
+        return (3/(4*fs**3))*(H0/np.pi)**2
+
+    def sgw_to_omega_factor(self, fs):
+        '''
+        Conversion factor from SGWB PSD units back to Omega(f) h^2 units.
+        '''
+        return 1.0 / self.omega_to_sgw_factor(fs)
+
+    def fixedL_powerlaw_signal(self, fs, log10_Ac, alpha, fc=None):
+        '''
+        Fixed-L SGWB power-law model in Omega_GW^L(f) h^2 units.
+
+        The fixed multipole is selected in configuration via fixedL, so this helper returns only the
+        spectral part, Omega_GW^L(f) h^2 = 10^(log10_Ac) * (f / f_c)^alpha.
+        '''
+        if fc is None:
+            fc = self.params.get('fixedL_fc', 2.5e-3)
+        return 10**(log10_Ac) * (fs / fc)**alpha
+
+    def d_fixedL_d_log10_Ac(self, fs, log10_Ac, alpha, fc=None):
+        '''
+        Diagnostic derivative of the fixed-L signal with respect to log10_Ac.
+        '''
+        signal = self.fixedL_powerlaw_signal(fs, log10_Ac, alpha, fc=fc)
+        return np.log(10.0) * signal
+
+    def d_fixedL_d_alpha(self, fs, log10_Ac, alpha, fc=None):
+        '''
+        Diagnostic derivative of the fixed-L signal with respect to alpha.
+        '''
+        if fc is None:
+            fc = self.params.get('fixedL_fc', 2.5e-3)
+        signal = self.fixedL_powerlaw_signal(fs, log10_Ac, alpha, fc=fc)
+        return np.log(fs / fc) * signal
+
+    def compute_fixedL_injected_sgw(self, fs, signal_args):
+        '''
+        Injection-only helper returning SGWB PSD units for the fixed-L power-law signal.
+        '''
+        log10_Ac, alpha = signal_args
+        omega_signal = self.fixedL_powerlaw_signal(fs, log10_Ac, alpha)
+        return omega_signal * self.omega_to_sgw_factor(fs)
+
+    def fixedL_analysis_guard_compute_Sgw(self, *args, **kwargs):
+        '''
+        Guard against routing the fixed-L channel likelihood through the legacy compute_Sgw path.
+        '''
+        raise RuntimeError("The fixed-L channel likelihood must not call compute_Sgw(...).")
+
+    def fixedL_analysis_guard_covariance(self, *args, **kwargs):
+        '''
+        Guard against routing the fixed-L channel likelihood through covariance assembly.
+        '''
+        raise RuntimeError("The fixed-L channel likelihood must not assemble a signal covariance matrix.")
     
     def get_prior_bounds(self,prior_key,default_bounds):
         '''
@@ -560,6 +667,21 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             raise ValueError("The single-multipole total-power mode requires 'multipole_l' >= 1 in the ini file.")
         
         return multipole_l
+
+    def get_selected_fixedL(self):
+        '''
+        Return the fixed multipole L for the channel-resolved fixed-L mode.
+        '''
+        if self.injection:
+            fixedL = self.inj.get('fixedL', self.params.get('fixedL', -1))
+        else:
+            fixedL = self.params.get('fixedL', -1)
+
+        fixedL = int(fixedL)
+        if fixedL < 1:
+            raise ValueError("The fixed-L channel mode requires 'fixedL' >= 1 in the ini file.")
+
+        return fixedL
     
     def get_single_multipole_amplitude_parameter(self):
         '''
@@ -572,6 +694,91 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Return the response-basis indices corresponding to the chosen multipole L and all of its m-modes.
         '''
         return [ii for ii in range((multipole_l + 1)**2) if self.idxtoalm(multipole_l, ii)[0] == multipole_l]
+
+    def get_fixedL_channel_pairs(self):
+        '''
+        Return the unique unordered AET channel pairs used in the fixed-L likelihood.
+        '''
+        return {
+            'AA': (0, 0),
+            'EE': (1, 1),
+            'TT': (2, 2),
+            'AE': (0, 1),
+            'AT': (0, 2),
+            'ET': (1, 2),
+        }
+
+    def compute_fixedL_channel_response_segments(self, response_basis_mat, fixedL):
+        '''
+        Build the per-segment fixed-L response for each unique channel pair from BLIP's direct pair
+        anisotropic response coefficients R_{OO',lm}(f,t).
+
+        This is the channel-resolved response used by the new fixed-L likelihood, not the legacy
+        covariance-template kernel. We compress the selected 2L+1 m-modes within each channel pair
+        into a real power-like response via mean_m |R_{OO',Lm}(f,t)|^2.
+        '''
+        fixedL_indices = self.get_single_multipole_indices(fixedL)
+        response_segments = {}
+        for pair, (ii, jj) in self.get_fixedL_channel_pairs().items():
+            pair_coefficients = np.take(response_basis_mat[ii, jj], fixedL_indices, axis=-1)
+            response_segments[pair] = np.mean(np.abs(pair_coefficients)**2, axis=-1)
+
+        return response_segments
+
+    def assemble_fixedL_channel_response_matrix(self, response_segments):
+        '''
+        Assemble the Hermitian 3x3 per-segment fixed-L response matrix from the unique unordered
+        AET channel pairs used by the channel-resolved likelihood.
+
+        The matrix elements are built directly from the per-pair fixed-L responses rather than
+        from the legacy hidden-index contraction used by the covariance-template mode.
+        '''
+        response_matrix = np.zeros((3, 3, self.fs.size, self.tsegmid.size), dtype='complex')
+        for pair, (ii, jj) in self.get_fixedL_channel_pairs().items():
+            response_matrix[ii, jj] = response_segments[pair]
+            if ii != jj:
+                response_matrix[jj, ii] = np.conj(response_segments[pair])
+
+        return response_matrix
+
+    def compute_fixedL_stochastic_power_response_matrix(self, response_basis_mat, fixedL):
+        '''
+        Legacy hidden-index fixed-L response contraction retained only for backwards comparison.
+
+        The new fixed-L channel likelihood must not use this helper. It contracts over the hidden
+        detector index to build a covariance-template kernel, which is the behavior replaced by the
+        direct per-pair fixed-L response matrix assembled in assemble_fixedL_channel_response_matrix.
+        '''
+        fixedL_indices = self.get_single_multipole_indices(fixedL)
+        multipole_response = np.take(response_basis_mat, fixedL_indices, axis=-1)
+        power_response = np.einsum('ikftm,jkftm->ijft', multipole_response, np.conj(multipole_response))
+        power_response = power_response / len(fixedL_indices)
+        power_response = 0.5 * (power_response + np.swapaxes(np.conj(power_response), 0, 1))
+        return power_response
+
+    def compute_fixedL_isotropic_normalization(self, fs=None, f0=None, tsegmid=None):
+        '''
+        Cross-check that the l=0,m=0 anisotropic response reproduces the isotropic response up to sqrt(4*pi).
+        '''
+        if self.params['tdi_lev'] != 'aet':
+            raise ValueError("The fixed-L isotropic-normalization cross-check is only implemented for AET.")
+
+        if fs is None:
+            fs = self.fs
+        if f0 is None:
+            f0 = self.f0
+        if tsegmid is None:
+            tsegmid = self.tsegmid
+
+        anisotropic_l0 = self.asgwb_aet_response(f0, tsegmid, set_almax=0)
+        isotropic = self.isgwb_aet_response(f0, tsegmid)
+        ratio = anisotropic_l0[:, :, :, :, 0] / isotropic
+
+        return {
+            'expected_ratio': np.sqrt(4*np.pi),
+            'ratio': ratio,
+            'max_abs_deviation': np.nanmax(np.abs(ratio - np.sqrt(4*np.pi))),
+        }
     
     def compute_single_multipole_response(self,response_basis_mat,multipole_l):
         '''
@@ -583,7 +790,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         dimensionless response matrix ready to be scaled by the total power amplitude A_L.
         '''
         multipole_indices = self.get_single_multipole_indices(multipole_l)
-        multipole_response = response_basis_mat[:, :, :, :, multipole_indices]
+        multipole_response = np.take(response_basis_mat, multipole_indices, axis=-1)
         effective_response_sq = np.einsum('ikftm,jkftm->ijft', multipole_response, np.conj(multipole_response))
         effective_response_sq = effective_response_sq / len(multipole_indices)
         
@@ -740,6 +947,16 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         log_amplitude = self.rescale_uniform_prior(theta[1],getattr(self,'powerlaw_amplitude_prior_key','log_omega0'),[-14,8])
         
         return [alpha, log_amplitude]
+
+    def fixedL_powerlaw_prior(self, theta):
+        '''
+        Prior transform for the fixed-L channel-resolved power-law signal.
+
+        Returns parameters in the dedicated order [log10_Ac, alpha].
+        '''
+        log10_Ac = self.rescale_uniform_prior(theta[0], 'log10_Ac', [-14, -8])
+        alpha = self.rescale_uniform_prior(theta[1], 'alpha', [-5, 5])
+        return [log10_Ac, alpha]
     
     def broken_powerlaw_prior(self,theta):
 
@@ -799,11 +1016,30 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
 
         return [alpha, log_omega0, log_fcut, log_fscale]
-    
-    
-    
-    
-    
+
+    def compute_fixedL_channel_noise_omega(self, fs, f0, log_Np, log_Na):
+        '''
+        Channel-resolved AET instrumental noise written in Omega h^2 units for the fixed-L likelihood.
+
+        Cross-channel AET noise terms are set to zero after confirming that BLIP's aet_noise_spectrum
+        returns only zero or negligible floating-point roundoff for AE, AT, and ET in this basis.
+        '''
+        if self.params['tdi_lev'] != 'aet':
+            raise ValueError("The fixed-L channel likelihood currently supports only tdi_lev='aet'.")
+
+        Np = 10**log_Np
+        Na = 10**log_Na
+        noise_cov = self.aet_noise_spectrum(fs, f0, Np=Np, Na=Na)
+        omega_factor = self.omega_to_sgw_factor(fs)
+        noise_omega = {}
+        for pair, (ii, jj) in self.get_fixedL_channel_pairs().items():
+            if pair in ['AE', 'AT', 'ET']:
+                noise_omega[pair] = np.zeros_like(fs)
+            else:
+                noise_omega[pair] = np.real(noise_cov[ii, jj, :]) / omega_factor
+
+        return noise_omega
+
     
     #############################
     ## Covariance Calculations ##
@@ -1070,6 +1306,205 @@ class Model():
         
         ## assign reference to data for use in likelihood
         self.rmat = rmat
+        self.f0 = f0
+        self.tsegmid = tsegmid
+        self.fixedL_channel_mode = np.any([
+            getattr(self.submodels[sm_name], 'spatial_model_name', None) == 'fixedLchannels'
+            for sm_name in self.submodel_names
+        ])
+        if self.fixedL_channel_mode:
+            self.configure_fixedL_channel_mode()
+
+    def configure_fixedL_channel_mode(self):
+        '''
+        Finalize the dedicated fixed-L channel-likelihood configuration.
+        '''
+        fixedL_submodels = [
+            sm_name for sm_name in self.submodel_names
+            if getattr(self.submodels[sm_name], 'spatial_model_name', None) == 'fixedLchannels'
+        ]
+        noise_submodels = [sm_name for sm_name in self.submodel_names if sm_name == 'noise']
+
+        if len(fixedL_submodels) != 1 or len(noise_submodels) != 1 or len(self.submodel_names) != 2:
+            raise ValueError(
+                "The fixed-L channel likelihood currently supports exactly one 'noise' submodel "
+                "and one 'powerlaw_fixedLchannels' submodel."
+            )
+
+        self.fixedL_signal_submodel_name = fixedL_submodels[0]
+        self.fixedL_noise_submodel_name = noise_submodels[0]
+        signal_submodel = self.submodels[self.fixedL_signal_submodel_name]
+        noise_submodel = self.submodels[self.fixedL_noise_submodel_name]
+
+        ## Use the dedicated parameter order theta = (log10_Ac, alpha, log_Np, log_Na).
+        self.parameters['spectral'] = signal_submodel.parameters + noise_submodel.parameters
+        self.parameters['spatial'] = []
+        self.parameters['all'] = signal_submodel.parameters + noise_submodel.parameters
+        self.Npar = len(self.parameters['all'])
+
+        self.fixedL_channel_pair_indices = signal_submodel.fixedL_channel_pairs
+        self.fixedL_channel_pairs = list(self.fixedL_channel_pair_indices.keys())
+        self.fixedL_channel_response_segments = signal_submodel.fixedL_channel_response_segments
+        self.fixedL_channel_response = signal_submodel.fixedL_channel_response
+        self.fixedL_Nc = self.rmat.shape[1]
+        (
+            self.fixedL_channel_data_segments,
+            self.fixedL_channel_data,
+            self.fixedL_channel_data_imag_segments,
+            self.fixedL_channel_data_imag,
+        ) = self.build_fixedL_channel_data_product()
+
+    def build_fixedL_channel_data_product(self):
+        '''
+        Build the real-valued channel-resolved fixed-L data product in Omega h^2 units.
+        '''
+        signal_submodel = self.submodels[self.fixedL_signal_submodel_name]
+        omega_factor = signal_submodel.omega_to_sgw_factor(self.fs)
+        data_segments = {}
+        data_average = {}
+        imag_segments = {}
+        imag_average = {}
+
+        for pair, (ii, jj) in self.fixedL_channel_pair_indices.items():
+            pair_csd_omega = self.rmat[:, :, ii, jj] / omega_factor[:, None]
+            data_segments[pair] = np.real(pair_csd_omega)
+            data_average[pair] = np.mean(data_segments[pair], axis=1)
+            imag_segments[pair] = np.imag(pair_csd_omega)
+            imag_average[pair] = np.mean(imag_segments[pair], axis=1)
+
+        return data_segments, data_average, imag_segments, imag_average
+
+    def fixedL_channel_prior(self, unit_theta):
+        '''
+        Dedicated prior ordering for the fixed-L channel likelihood:
+        (log10_Ac, alpha, log_Np, log_Na).
+        '''
+        signal_submodel = self.submodels[self.fixedL_signal_submodel_name]
+        noise_submodel = self.submodels[self.fixedL_noise_submodel_name]
+        theta = signal_submodel.prior(unit_theta[:signal_submodel.Npar])
+        theta += noise_submodel.prior(unit_theta[signal_submodel.Npar:(signal_submodel.Npar + noise_submodel.Npar)])
+
+        if len(theta) != len(unit_theta):
+            raise ValueError("Fixed-L prior transform changed the dimensionality of theta.")
+
+        return theta
+
+    def compute_fixedL_channel_theory(self, theta):
+        '''
+        Compute the fixed-L signal, noise, and channel-resolved theory curves in Omega h^2 units.
+        '''
+        signal_submodel = self.submodels[self.fixedL_signal_submodel_name]
+        log10_Ac, alpha, log_Np, log_Na = theta
+        signal_omega = signal_submodel.fixedL_powerlaw_signal(self.fs, log10_Ac, alpha)
+        noise_omega = signal_submodel.compute_fixedL_channel_noise_omega(self.fs, self.f0, log_Np, log_Na)
+        theory = {
+            pair: self.fixedL_channel_response[pair] * signal_omega + noise_omega[pair]
+            for pair in self.fixedL_channel_pairs
+        }
+
+        return signal_omega, noise_omega, theory
+
+    def likelihood_fixedL_channels(self, theta):
+        '''
+        Channel-resolved Gaussian likelihood for the fixed-L power-law SGWB mode.
+        '''
+        if self.params.get('fixedL_variance_model', 'theory_square') != 'theory_square':
+            raise ValueError("Unsupported fixedL_variance_model '{}'; only 'theory_square' is implemented.".format(
+                self.params.get('fixedL_variance_model')
+            ))
+
+        _, _, theory = self.compute_fixedL_channel_theory(theta)
+        loglike = 0.0
+        tiny = np.finfo(float).tiny
+        for pair in self.fixedL_channel_pairs:
+            residual = self.fixedL_channel_data[pair] - theory[pair]
+            sigma2 = np.maximum(theory[pair]**2, tiny)
+            loglike -= 0.5 * self.fixedL_Nc * np.sum(residual**2 / sigma2)
+
+        return float(np.real(loglike))
+
+    def save_fixedL_channel_diagnostics(self, post, out_dir):
+        '''
+        Save fixed-L channel diagnostics and minimal plots for the dedicated channel likelihood mode.
+        '''
+        if not self.fixedL_channel_mode:
+            return
+
+        if out_dir[-1] != '/':
+            out_dir = out_dir + '/'
+
+        median_theta = np.median(post, axis=0)
+        signal_omega, noise_omega, theory = self.compute_fixedL_channel_theory(median_theta)
+        signal_submodel = self.submodels[self.fixedL_signal_submodel_name]
+
+        np.savez(
+            out_dir + 'fixedL_signal_omega.npz',
+            fs=self.fs,
+            fixedL=signal_submodel.fixedL,
+            fixedL_fc=self.params.get('fixedL_fc', 2.5e-3),
+            log10_Ac=median_theta[0],
+            alpha=median_theta[1],
+            signal_omega=signal_omega,
+            d_log10_Ac=signal_submodel.d_fixedL_d_log10_Ac(self.fs, median_theta[0], median_theta[1]),
+            d_alpha=signal_submodel.d_fixedL_d_alpha(self.fs, median_theta[0], median_theta[1]),
+        )
+        np.savez(
+            out_dir + 'fixedL_channel_response.npz',
+            fs=self.fs,
+            **{pair: self.fixedL_channel_response[pair] for pair in self.fixedL_channel_pairs}
+        )
+        np.savez(
+            out_dir + 'fixedL_channel_noise_omega.npz',
+            fs=self.fs,
+            log_Np=median_theta[2],
+            log_Na=median_theta[3],
+            **{pair: noise_omega[pair] for pair in self.fixedL_channel_pairs}
+        )
+        np.savez(
+            out_dir + 'fixedL_channel_data.npz',
+            fs=self.fs,
+            Nc=self.fixedL_Nc,
+            **{pair: self.fixedL_channel_data[pair] for pair in self.fixedL_channel_pairs},
+            **{pair + '_imag': self.fixedL_channel_data_imag[pair] for pair in self.fixedL_channel_pairs},
+            **{pair + '_segments': self.fixedL_channel_data_segments[pair] for pair in self.fixedL_channel_pairs},
+            **{pair + '_imag_segments': self.fixedL_channel_data_imag_segments[pair] for pair in self.fixedL_channel_pairs},
+        )
+        np.savez(
+            out_dir + 'fixedL_channel_theory.npz',
+            fs=self.fs,
+            **{pair: theory[pair] for pair in self.fixedL_channel_pairs}
+        )
+
+        plt.close()
+        plt.loglog(self.fs, signal_omega, color='royalblue')
+        plt.xlabel('$f$ in Hz')
+        plt.ylabel(r'$\Omega_{\mathrm{GW}}^L(f) h^2$')
+        plt.title('Posterior-Median Fixed-L Signal')
+        plt.savefig(out_dir + 'fixedL_signal_omega.png', dpi=200)
+        plt.close()
+
+        fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+        for ax, pair in zip(axes.flatten(), self.fixedL_channel_pairs):
+            ax.loglog(self.fs, np.maximum(self.fixedL_channel_response[pair], np.finfo(float).tiny), color='slateblue')
+            ax.set_title(pair)
+            ax.set_xlabel('$f$ [Hz]')
+            ax.set_ylabel(r'$\tilde{R}_{OO^\prime,L}$')
+        plt.tight_layout()
+        plt.savefig(out_dir + 'fixedL_channel_response.png', dpi=200)
+        plt.close(fig)
+
+        fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+        for ax, pair in zip(axes.flatten(), self.fixedL_channel_pairs):
+            ax.semilogx(self.fs, self.fixedL_channel_data[pair], label='Data', color='slategrey', alpha=0.8)
+            ax.semilogx(self.fs, theory[pair], label='Theory', color='royalblue')
+            ax.semilogx(self.fs, noise_omega[pair], label='Noise', color='dimgrey', ls='--')
+            ax.set_title(pair)
+            ax.set_xlabel('$f$ [Hz]')
+            ax.set_ylabel(r'$\Omega h^2$')
+        axes.flatten()[0].legend(loc='best', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(out_dir + 'fixedL_channel_data_theory.png', dpi=200)
+        plt.close(fig)
     
 
     def prior(self,unit_theta):
@@ -1084,6 +1519,9 @@ class Model():
         ----------------
         theta (list) : transformed prior draws for all submodels in sequence
         '''
+        if self.fixedL_channel_mode:
+            return self.fixedL_channel_prior(unit_theta)
+
         theta = []
         start_idx = 0
         
@@ -1110,6 +1548,9 @@ class Model():
         ----------------
         loglike (float) : resulting joint log likelihood
         '''
+        if self.fixedL_channel_mode:
+            return self.likelihood_fixedL_channels(theta)
+
         start_idx = 0
         for i, sm_name in enumerate(self.submodel_names):
             sm = self.submodels[sm_name]
@@ -1227,7 +1668,7 @@ class Injection():#geometry,sph_geometry):
         if not imaginary:
             PSD = np.abs(np.real(cm.frozen_convolved_spectra[c1_idx,c2_idx,:]))
         else:
-            PSD = 1j * np.abs(np.imag(cm.frozen_convolved_spectra[c1_idx,c2_idx,:]))
+            PSD = np.abs(np.imag(cm.frozen_convolved_spectra[c1_idx,c2_idx,:]))
         
         ## populations need some finessing due to frequency subtleties                
         if hasattr(cm,"ispop") and cm.ispop:
@@ -1241,9 +1682,12 @@ class Injection():#geometry,sph_geometry):
             fs = self.frange
             if fs_new is not None:
                 with log_manager(logging.ERROR):
-                    PSD_interp = interp1d(fs,np.log10(PSD))
+                    PSD_interp = interp1d(fs,np.log10(np.maximum(PSD, np.finfo(float).tiny)))
                     PSD = 10**PSD_interp(fs_new)
                     fs = fs_new
+
+        if imaginary:
+            PSD = 1j * PSD
 
         if return_fs:
             return fs, PSD

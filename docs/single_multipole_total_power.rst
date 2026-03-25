@@ -1,7 +1,12 @@
 Single-Multipole Total-Power Mode
 =================================
 
+Legacy / Experimental
+---------------------
+
 This mode adds a fixed-``L`` anisotropic search that infers only one multipole's total power amplitude and slope. It does not sample individual ``b_lm`` coefficients and it does not reconstruct a sky map.
+
+This mode is kept for legacy and experimental work only. It is not the new fixed-``L`` channel-resolved likelihood. For the rigorous fixed-``L`` likelihood, use ``powerlaw_fixedLchannels`` instead.
 
 Use the standard BLIP model strings
 

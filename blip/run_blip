@@ -33,7 +33,7 @@ def format_prior_bounds_summary(prior_bounds):
     '''
     Format a compact one-line summary of parsed prior intervals.
     '''
-    ordered_keys = ['log_Np','log_Na','alpha','log_A_L','log_omega0',
+    ordered_keys = ['log10_Ac','log_Np','log_Na','alpha','log_A_L','log_omega0',
                     'alpha1','alpha2','log_fbreak','log_fcut','log_fscale']
     parts = []
     for key in ordered_keys:
@@ -63,7 +63,8 @@ class LISA(LISAdata, Model):
 
         # Set up the Bayes class
         print("Building Bayesian model...")
-        self.make_data_correlation_matrix()
+        if not getattr(self, 'fixedL_direct_rmat_ready', False):
+            self.make_data_correlation_matrix()
         self.Model = Model(params,inj,self.fdata,self.f0,self.tsegmid,self.rmat)
         
         # make sure matching injections/models have matching colors
@@ -83,6 +84,10 @@ class LISA(LISAdata, Model):
         Just a wrapper function to use the methods the LISAdata class
         to generate data. Return Frequency domain data.
         '''
+
+        if self.uses_fixedL_channel_frequency_domain_injection():
+            self.make_fixedL_channel_frequency_domain_data()
+            return
 
         ## define the splice segment duration
         tsplice = 1e4
@@ -140,6 +145,122 @@ class LISA(LISAdata, Model):
         cspeed = 3e8
         fstar = cspeed/(2*np.pi*self.armlength)
         self.f0 = self.fdata/(2*fstar)
+
+    def uses_fixedL_channel_frequency_domain_injection(self):
+        '''
+        Return True when the injection contains the dedicated fixed-L channel mode.
+
+        In this case we generate the injected data directly in BLIP's frequency-domain data
+        products so that the injected covariance uses the same direct per-pair fixed-L response
+        object as the channel-resolved likelihood.
+        '''
+        if not self.inj.get('doInj', 0):
+            return False
+
+        injection_name = self.inj.get('injection', '')
+        if injection_name == '':
+            return False
+
+        spatial_components = [component.split('-')[0].split('_')[-1] for component in injection_name.split('+')]
+        return 'fixedLchannels' in spatial_components
+
+    def make_fixedL_channel_frequency_domain_data(self):
+        '''
+        Generate a fixed-L channel-likelihood injection directly in BLIP's frequency-domain data
+        representation.
+
+        This remains fully integrated with the usual BLIP Injection/Model/sampler plumbing while
+        avoiding the legacy time-domain SGWB synthesis path that contracts the fixed-L response into
+        a different covariance object.
+        '''
+        Nperseg = int(self.params['fs'] * self.params['seglen'])
+        fftfreqs = np.fft.rfftfreq(Nperseg, 1.0 / self.params['fs'])
+        idx = np.logical_and(fftfreqs >= self.params['fmin'], fftfreqs <= self.params['fmax'])
+
+        self.fdata = fftfreqs[idx]
+        self.tsegstart = self.params['tstart'] + self.params['seglen'] * np.arange(int(np.floor(self.params['dur'] / self.params['seglen'])) - 1)
+        self.tsegmid = self.tsegstart + 0.5 * self.params['seglen']
+
+        cspeed = 3e8
+        fstar = cspeed / (2 * np.pi * self.armlength)
+        self.f0 = self.fdata / (2 * fstar)
+
+        print("Constructing injection...")
+        self.Injection = Injection(self.params, self.inj, self.fdata, self.f0, self.tsegmid)
+
+        fixedL_components = [
+            component for component in self.Injection.sgwb_component_names
+            if getattr(self.Injection.components[component], 'spatial_model_name', None) == 'fixedLchannels'
+        ]
+        if len(fixedL_components) == 0:
+            raise ValueError("The fixed-L frequency-domain injection path was requested, but no fixedLchannels component was found.")
+        if len(fixedL_components) != len(self.Injection.sgwb_component_names):
+            raise ValueError("The fixed-L frequency-domain injection path currently supports only 'noise' plus fixedLchannels SGWB components.")
+
+        noise_cov = self.Injection.components['noise'].frozen_spectra[:, :, :, None]
+        total_cov = np.repeat(noise_cov, self.tsegmid.size, axis=-1).astype('complex')
+
+        for component in fixedL_components:
+            injmodel = self.Injection.components[component]
+            injmodel_args = [injmodel.truevals[parameter] for parameter in injmodel.spectral_parameters]
+            if hasattr(injmodel, 'compute_injected_sgw'):
+                Sgw = injmodel.compute_injected_sgw(self.fdata, injmodel_args)
+            else:
+                Sgw = injmodel.compute_Sgw(self.fdata, injmodel_args)
+            injmodel.frozen_spectra = Sgw
+            total_cov += Sgw[None, None, :, None] * injmodel.inj_response_mat
+
+        total_cov = 0.5 * (total_cov + np.swapaxes(np.conj(total_cov), 0, 1))
+
+        injection_mode = self.inj.get('fixedL_injection_mode', 'mean_rmat')
+        if injection_mode == 'mean_rmat':
+            self.fixedL_direct_rmat_ready = True
+            self.rmat = np.moveaxis(total_cov, [2, 3], [0, 1])
+            self.r1 = np.sqrt(np.maximum(np.real(self.rmat[:, :, 0, 0]), 0.0)).astype('complex')
+            self.r2 = np.sqrt(np.maximum(np.real(self.rmat[:, :, 1, 1]), 0.0)).astype('complex')
+            self.r3 = np.sqrt(np.maximum(np.real(self.rmat[:, :, 2, 2]), 0.0)).astype('complex')
+            self.r12 = self.rmat[:, :, 0, 1]
+            self.r13 = self.rmat[:, :, 0, 2]
+            self.r21 = self.rmat[:, :, 1, 0]
+            self.r23 = self.rmat[:, :, 1, 2]
+            self.r31 = self.rmat[:, :, 2, 0]
+            self.r32 = self.rmat[:, :, 2, 1]
+            self.rbar = np.stack((self.r1, self.r2, self.r3), axis=2)
+        elif injection_mode == 'stochastic_segments':
+            self.fixedL_direct_rmat_ready = False
+            rbar = np.zeros((self.fdata.size, self.tsegmid.size, 3), dtype='complex')
+            eye = np.eye(3, dtype='complex')
+            tiny = np.finfo(float).eps
+            for tidx in range(self.tsegmid.size):
+                cov_ft = np.moveaxis(total_cov[:, :, :, tidx], -1, 0).copy()
+                for fidx in range(self.fdata.size):
+                    cov_ft[fidx] = 0.5 * (cov_ft[fidx] + np.conj(cov_ft[fidx].T))
+                    min_eig = np.min(np.real(np.linalg.eigvalsh(cov_ft[fidx])))
+                    if min_eig < 0:
+                        cov_ft[fidx] += eye * (-min_eig + 100 * tiny)
+
+                chol = np.linalg.cholesky(cov_ft)
+                z_norm = (
+                    np.random.normal(size=(self.fdata.size, 3))
+                    + 1j * np.random.normal(size=(self.fdata.size, 3))
+                ) / np.sqrt(2.0)
+                rbar[:, tidx, :] = np.einsum('fij,fj->fi', chol, z_norm)
+
+            self.r1, self.r2, self.r3 = rbar[:, :, 0], rbar[:, :, 1], rbar[:, :, 2]
+        else:
+            raise ValueError(
+                "Unknown fixedL_injection_mode '{}'. Supported values are 'mean_rmat' and 'stochastic_segments'.".format(
+                    injection_mode
+                )
+            )
+
+        np.savez(
+            self.params['out_dir'] + '/' + self.params['input_spectrum'],
+            r1=self.r1,
+            r2=self.r2,
+            r3=self.r3,
+            fdata=self.fdata
+        )
         
     def make_data_correlation_matrix(self):
         '''
@@ -170,8 +291,13 @@ class LISA(LISAdata, Model):
 
         # ------------ Calculate PSD ------------------
 
-        # PSD from the FFTs
-        data_PSD1, data_PSD2, data_PSD3  = np.mean(np.abs(self.r1)**2, axis=1), np.mean(np.abs(self.r2)**2, axis=1), np.mean(np.abs(self.r3)**2, axis=1)
+        if getattr(self, 'fixedL_direct_rmat_ready', False):
+            data_PSD1 = np.mean(np.real(self.rmat[:, :, 0, 0]), axis=1)
+            data_PSD2 = np.mean(np.real(self.rmat[:, :, 1, 1]), axis=1)
+            data_PSD3 = np.mean(np.real(self.rmat[:, :, 2, 2]), axis=1)
+        else:
+            # PSD from the FFTs
+            data_PSD1, data_PSD2, data_PSD3  = np.mean(np.abs(self.r1)**2, axis=1), np.mean(np.abs(self.r2)**2, axis=1), np.mean(np.abs(self.r3)**2, axis=1)
 
         # "Cut" to desired frequencies
         idx = np.logical_and(self.fdata >=  self.params['fmin'] , self.fdata <=  self.params['fmax'])
@@ -304,14 +430,17 @@ class LISA(LISAdata, Model):
                 iymins.append(np.imag(Sx_gw).min())
                 Sx = Sx + Sx_gw
        
-        CSDx = np.mean(np.conj(self.rbar[:, :, ii]) * self.rbar[:, :, jj], axis=1)
+        if getattr(self, 'fixedL_direct_rmat_ready', False):
+            CSDx = np.mean(self.rmat[:, :, ii, jj], axis=1)
+        else:
+            CSDx = np.mean(np.conj(self.rbar[:, :, ii]) * self.rbar[:, :, jj], axis=1)
 
         plt.subplot(2, 1, 1)
         if len(Sx.shape) == 1:
-            plt.loglog(self.fdata, np.abs(np.real(Sx)), label='Re(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
+            plt.loglog(self.fdata, np.maximum(np.abs(np.real(Sx)), np.finfo(float).tiny), label='Re(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
         else:
-            plt.loglog(self.fdata, np.mean(np.abs(np.real(Sx)),axis=1), label='Re(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
-        plt.loglog(psdfreqs, np.abs(np.real(CSDx)) ,label='Re(CSD' + str(ii+1) + str(jj+1) + ')', alpha=0.6,color='slategrey')
+            plt.loglog(self.fdata, np.maximum(np.mean(np.abs(np.real(Sx)),axis=1), np.finfo(float).tiny), label='Re(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
+        plt.loglog(psdfreqs, np.maximum(np.abs(np.real(CSDx)), np.finfo(float).tiny) ,label='Re(CSD' + str(ii+1) + str(jj+1) + ')', alpha=0.6,color='slategrey')
         plt.xlabel('f in Hz')
         plt.ylabel('Power in 1/Hz')
         plt.legend()
@@ -321,11 +450,11 @@ class LISA(LISAdata, Model):
 
         plt.subplot(2, 1, 2)
         if len(Sx.shape) == 1:
-            plt.loglog(self.fdata, np.abs(np.imag(Sx)), label='Im(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
+            plt.loglog(self.fdata, np.maximum(np.abs(np.imag(Sx)), np.finfo(float).tiny), label='Im(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
         else:
-            plt.loglog(self.fdata, np.mean(np.abs(np.imag(Sx)),axis=1), label='Im(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
+            plt.loglog(self.fdata, np.maximum(np.mean(np.abs(np.imag(Sx)),axis=1), np.finfo(float).tiny), label='Im(Required ' + str(ii+1) + str(jj+1) + ')',color='mediumvioletred')
 
-        plt.loglog(psdfreqs, np.abs(np.imag(CSDx)) ,label='Im(CSD' + str(ii+1) + str(jj+1) + ')', alpha=0.6,color='slategrey')
+        plt.loglog(psdfreqs, np.maximum(np.abs(np.imag(CSDx)), np.finfo(float).tiny) ,label='Im(CSD' + str(ii+1) + str(jj+1) + ')', alpha=0.6,color='slategrey')
         plt.xlabel('f in Hz')
         plt.ylabel(' Power in 1/Hz')
         plt.legend()
@@ -410,8 +539,12 @@ def blip(paramsfile='params.ini',resume=False):
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
     params['multipole_l'] = int(config.get("params", "multipole_l", fallback=-1))
+    params['fixedL'] = int(config.get("params", "fixedL", fallback=params['multipole_l']))
+    params['fixedL_fc'] = float(config.get("params", "fixedL_fc", fallback=2.5e-3))
+    params['fixedL_variance_model'] = str(config.get("params", "fixedL_variance_model", fallback='theory_square'))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
-    params['prior_bounds'] = {'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
+    params['prior_bounds'] = {'log10_Ac':parse_prior_bounds(config,'log10_Ac',[-14,-8]),
+                              'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
                               'log_Na':parse_prior_bounds(config,'log_Na',[-51,-46]),
                               'alpha':parse_prior_bounds(config,'alpha',[-5,5]),
                               'log_omega0':parse_prior_bounds(config,'log_omega0',[-14,8]),
@@ -433,6 +566,8 @@ def blip(paramsfile='params.ini',resume=False):
     if inj['doInj']:
         inj['injection'] = str(config.get("inj", "injection"))
         inj['multipole_l'] = int(config.get("inj", "multipole_l", fallback=params['multipole_l']))
+        inj['fixedL'] = int(config.get("inj", "fixedL", fallback=params['fixedL']))
+        inj['fixedL_injection_mode'] = str(config.get("inj", "fixedL_injection_mode", fallback='mean_rmat'))
         
         ## get the injection truevals, passed as a dict
         truevals = eval(str(config.get("inj","truevals")))
@@ -458,12 +593,16 @@ def blip(paramsfile='params.ini',resume=False):
         sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
     
     ## set sph flags
-    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check)
+    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check) or ('fixedLchannels' in sph_check)
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     
     if inj['sph_flag']:
-        default_inj_lmax = max(params['lmax'], params.get('multipole_l', -1), inj.get('multipole_l', -1))
+        default_inj_lmax = max(params['lmax'],
+                               params.get('multipole_l', -1),
+                               inj.get('multipole_l', -1),
+                               params.get('fixedL', -1),
+                               inj.get('fixedL', -1))
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
         except configparser.NoOptionError as err:

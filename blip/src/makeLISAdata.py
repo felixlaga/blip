@@ -50,7 +50,10 @@ class LISAdata():
         ## compute the astrophysical spectrum
         injmodel_args = [injmodel.truevals[parameter] for parameter in injmodel.spectral_parameters]
         
-        Sgw = injmodel.compute_Sgw(self.Injection.frange,injmodel_args)
+        if hasattr(injmodel, 'compute_injected_sgw'):
+            Sgw = injmodel.compute_injected_sgw(self.Injection.frange, injmodel_args)
+        else:
+            Sgw = injmodel.compute_Sgw(self.Injection.frange,injmodel_args)
         
         injmodel.frozen_spectra = Sgw
         

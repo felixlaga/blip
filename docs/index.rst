@@ -10,6 +10,8 @@ Welcome to BLIP's documentation!
    :maxdepth: 2
    :caption: Contents:
     
+   fixedL_channel_likelihood
+   single_multipole_total_power
    tools
    modules
    src

@@ -20,6 +20,10 @@ except ImportError:
     PlotConfig = None
     SummaryStatistic = None
     Truth = None
+try:
+    import corner as corner_plot
+except ImportError:
+    corner_plot = None
 import healpy as hp
 from healpy import Alm
 from astropy import units as u
@@ -296,6 +300,12 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
     ## update det kwargs
     det_kwargs = {'title':"Fit vs. Injection (in Detector)"} | det_kwargs
     det_kwargs = default_kwargs | det_kwargs
+
+    if getattr(Model, 'fixedL_channel_mode', False):
+        print("Saving fixed-L channel diagnostics...")
+        destination = saveto if saveto is not None else params['out_dir']
+        Model.save_fixedL_channel_diagnostics(post, destination)
+        return
     
     print("Computing spectral fit median and 95% CI...")
     ## get samples
@@ -564,6 +574,51 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         params['out_dir'] = params['out_dir'] + '/'
     
     if ChainConsumer is None:
+        if corner_plot is not None:
+            print("ChainConsumer is not installed. Falling back to the 'corner' library for posterior plots.")
+            truths = None
+            if knowTrue:
+                truths = [truevals.get(parameter, None) for parameter in all_parameters]
+
+            fig = corner_plot.corner(
+                post,
+                labels=all_parameters,
+                truths=truths,
+                bins=40,
+                quantiles=[0.16, 0.5, 0.84],
+                show_titles=False,
+                title_fmt='.3g',
+                plot_datapoints=False,
+                fill_contours=True,
+                color='slateblue',
+                levels=(1 - np.exp(-0.5), 1 - np.exp(-2.0)),
+                hist_kwargs={'color': 'slateblue', 'alpha': 0.85},
+            )
+
+            axes = np.array(fig.axes).reshape((npar, npar))
+            for ii in range(npar):
+                qlo, qmed, qhi = np.quantile(post[:, ii], [0.16, 0.5, 0.84])
+                err_hi = qhi - qmed
+                err_lo = qmed - qlo
+                label = all_parameters[ii][:-1] if all_parameters[ii].endswith('$') else all_parameters[ii]
+                suffix = '$' if all_parameters[ii].endswith('$') else ''
+                axes[ii, ii].set_title(
+                    label + ' = {:.3g}^{{+{:.2g}}}_{{-{:.2g}}}'.format(qmed, err_hi, err_lo) + suffix,
+                    fontsize=12,
+                    loc='left'
+                )
+
+            if saveto is not None:
+                fig.savefig(saveto + 'corners.png', dpi=200)
+            else:
+                fig.savefig(params['out_dir'] + 'corners.png', dpi=200)
+            print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
+            plt.close(fig)
+
+            if not params['load_data']:
+                print("ChainConsumer is not installed. Skipping walker plot generation.")
+            return
+
         print("ChainConsumer is not installed. Falling back to a basic matplotlib corner plot.")
         fig, axes = plt.subplots(npar, npar, figsize=(4*npar, 4*npar))
         axes = np.atleast_2d(axes)
