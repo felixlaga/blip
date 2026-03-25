@@ -1,0 +1,522 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{setspace}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\onehalfspacing
+
+\newcommand{\Om}{\Omega_{\rm GW}}
+\newcommand{\OmL}{\Omega_{\rm GW}^{L}}
+\newcommand{\fc}{f_{\rm c}}
+\newcommand{\fstar}{f_\ast}
+\newcommand{\Larm}{L_{\rm arm}}
+\newcommand{\Nc}{N_{\rm c}}
+\newcommand{\Rlm}{\mathcal{R}}
+\newcommand{\Rsp}{\widetilde{\mathcal{R}}}
+\newcommand{\Ntil}{\widetilde{\mathcal{N}}}
+\newcommand{\Dobs}{\mathcal{D}}
+\newcommand{\Dth}{\mathcal{D}^{\rm th}}
+\newcommand{\sgw}{S_{\rm GW}}
+\newcommand{\OO}{OO^\prime}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\ee}{\mathrm{e}}
+
+\title{Methods for a Channel-Resolved Fixed-$L$ Anisotropic SGWB Likelihood in BLIP}
+\author{Draft Methods Note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document presents a rigorous description of the new fixed-$L$ anisotropic stochastic gravitational-wave background (SGWB) analysis implemented as an extension of the Bayesian LISA Inference Package (BLIP).  The extension targets the inference problem in which one does \emph{not} sample individual sky-harmonic coefficients $a_{Lm}$, $b_{Lm}$, or an angular power spectrum coefficient $C_L$ directly, but instead infers a phenomenological fixed-$L$ spectral amplitude and slope together with two instrumental-noise amplitudes.  The sampled parameter vector is
+\begin{equation}
+  \vect{\theta} \equiv \left(\log_{10}A_{\rm c},\ \alpha,\ \log N_{\rm p},\ \log N_{\rm a}\right),
+\end{equation}
+where $\log_{10}A_{\rm c}$ is the logarithmic SGWB amplitude at a pivot frequency $\fc$, $\alpha$ is the spectral tilt, and $(N_{\rm p},N_{\rm a})$ describe the metrology and acceleration noise levels.  The likelihood is channel-resolved, Gaussian in frequency bins, and evaluated on the six unique A/E/T auto- and cross-channel pairs $(AA,EE,TT,AE,AT,ET)$.  Crucially, this analysis is a genuine BLIP extension: it reuses BLIP's existing data segmentation, anisotropic response generation, A/E/T noise utilities, prior machinery, and sampler backends, while bypassing the legacy covariance-template likelihood that is appropriate to a different inference problem.
+\end{abstract}
+
+\tableofcontents
+
+\section{Scope and Statistical Target}
+
+The aim of the new analysis is to isolate and infer the contribution of a \emph{single chosen multipole} $L$ of the anisotropic SGWB in a way that is faithful to the fixed-$L$ formalism developed in Ref.~\cite{LISAAnisotropyPaper}, but implemented inside BLIP's existing Bayesian infrastructure.  The scientific target is \emph{not} a sky map, and it is \emph{not} an unconstrained set of multipole coefficients.  Instead, the target is the effective fixed-$L$ SGWB spectrum,
+\begin{equation}
+  \OmL(f)h^2,
+\end{equation}
+parameterized at the phenomenological level by an amplitude and a spectral slope, and inferred simultaneously with the two instrumental-noise amplitudes used by BLIP's LISA noise model.
+
+This distinction matters.  BLIP's legacy single-multipole path, denoted \texttt{powerlaw\_multipole}, constructs a full $3\times 3$ signal covariance kernel from a hidden-index contraction of the anisotropic response basis and evaluates a matrix likelihood involving inverses and determinants of the total covariance.  That legacy construction addresses an \emph{effective covariance-template} problem.  The fixed-$L$ extension described here addresses instead a \emph{channel-resolved spectral likelihood} problem.  The two problems are not equivalent, and the new mode therefore does not use the legacy covariance-template machinery for inference.
+
+\section{Angular Description of the SGWB and the Fixed-$L$ Reduction}
+
+\subsection{Angular decomposition}
+
+Let $\hat{\vect{n}}$ denote a direction on the sky.  A standard harmonic decomposition of an anisotropic SGWB energy-density field may be written schematically as
+\begin{equation}
+  \Om(f,\hat{\vect{n}})h^2
+  =
+  \sum_{\ell=0}^{\infty}\sum_{m=-\ell}^{\ell}
+  \Om_{\ell m}(f)h^2\,Y_{\ell m}(\hat{\vect{n}}).
+\end{equation}
+For a statistically isotropic random field, distinct $(\ell,m)$ modes are uncorrelated, and at fixed $\ell$ all $m$-modes share the same variance.  Ref.~\cite{LISAAnisotropyPaper} exploits this fact to define a multipole-by-multipole detectability problem for LISA.
+
+In the fixed-$L$ analysis we assume that the SGWB is dominated by one multipole $L$, and that the ensemble of $m$-modes at that multipole is statistically isotropic.  The phenomenological model is therefore not a deterministic set of $\Om_{Lm}(f)$, but rather a stochastic fixed-$L$ component whose total spectral normalization is encoded in a single scalar function of frequency.
+
+\subsection{Fixed-$L$ spectral model}
+
+Following Eq.~(5.2) of Ref.~\cite{LISAAnisotropyPaper}, the fixed-$L$ spectrum is written as
+\begin{equation}
+  \Om_{\ell}^{\rm GW}(f)h^2
+  =
+  \delta_{\ell L}\,10^{\log_{10}A_{\rm c}}
+  \left(\frac{f}{\fc}\right)^{\alpha},
+  \label{eq:fixedL-spectrum-general}
+\end{equation}
+so that for the single multipole retained in the analysis,
+\begin{equation}
+  \OmL(f)h^2
+  =
+  10^{\log_{10}A_{\rm c}}
+  \left(\frac{f}{\fc}\right)^{\alpha}.
+  \label{eq:fixedL-spectrum}
+\end{equation}
+The pivot frequency is taken to be
+\begin{equation}
+  \fc = 2.5\times 10^{-3}\ {\rm Hz},
+\end{equation}
+unless explicitly changed in the configuration file.
+
+The model derivatives used for diagnostics, Fisher checks, and regression tests follow immediately:
+\begin{align}
+  \frac{\partial\!\left[\OmL(f)h^2\right]}{\partial \log_{10}A_{\rm c}}
+  &= \ln(10)\,\OmL(f)h^2, \\
+  \frac{\partial\!\left[\OmL(f)h^2\right]}{\partial \alpha}
+  &= \ln\!\left(\frac{f}{\fc}\right)\,\OmL(f)h^2.
+  \label{eq:fixedL-derivatives}
+\end{align}
+
+\section{BLIP Harmonic Response Basis and the Fixed-$L$ Channel Response}
+
+\subsection{Underlying anisotropic response basis}
+
+The fixed-$L$ extension is built directly on BLIP's existing anisotropic response generator \texttt{asgwb\_aet\_response}.  This routine constructs the A/E/T harmonic response coefficients
+\begin{equation}
+  \Rlm_{\OO,\ell m}(f,t)
+  \equiv
+  \frac{1}{2}
+  \int \dd^2\hat{\vect{n}}\,
+  \Gamma_{\OO}(f,t,\hat{\vect{n}})\,
+  Y_{\ell m}(\hat{\vect{n}}),
+  \label{eq:response-harmonic-basis}
+\end{equation}
+where $\Gamma_{\OO}$ denotes the polarization-averaged directional power response of the chosen channel pair.  In BLIP this object is evaluated numerically from the time-dependent LISA geometry and the polarization transfer functions, and it is already a response \emph{to SGWB power}, not to the strain amplitude itself.
+
+The implementation starts from the Michelson-like response basis, rotates it into the $X,Y,Z$ TDI basis, and then forms the orthonormal A/E/T combinations
+\begin{equation}
+  d_O = c_{Oi} d_i,
+  \qquad O\in\{A,E,T\},\quad i\in\{X,Y,Z\},
+\end{equation}
+with coefficients
+\begin{align}
+  \vect{c}_{A} &= \left(\frac{2}{3},-\frac{1}{3},-\frac{1}{3}\right),\\
+  \vect{c}_{E} &= \left(0,-\frac{1}{\sqrt{3}},\frac{1}{\sqrt{3}}\right),\\
+  \vect{c}_{T} &= \left(\frac{1}{3},\frac{1}{3},\frac{1}{3}\right).
+  \label{eq:aet-transform}
+\end{align}
+The harmonic response coefficients in A/E/T are therefore
+\begin{equation}
+  \Rlm_{OO^\prime,\ell m}(f,t)
+  =
+  c_{Oi} c_{O^\prime j}\,
+  \Rlm_{ij,\ell m}(f,t).
+  \label{eq:aet-response-transform}
+\end{equation}
+
+\subsection{Rotationally invariant fixed-$L$ response}
+
+Ref.~\cite{LISAAnisotropyPaper} introduces the rotationally invariant fixed-$\ell$ response by summing over $m$-modes, cf.\ Eqs.~(4.23)--(4.30).  In the BLIP implementation one begins from the same harmonic basis, but the effective response used in the likelihood is the \emph{direct pairwise power response} obtained by averaging the squared modulus of the fixed-$L$ harmonic coefficients over the $2L+1$ values of $m$:
+\begin{equation}
+  \widehat{R}_{\OO,L}(f,t_c)
+  \equiv
+  \frac{1}{2L+1}
+  \sum_{m=-L}^{L}
+  \left|
+    \Rlm_{\OO,Lm}(f,t_c)
+  \right|^2 .
+  \label{eq:implemented-fixedL-response-segment}
+\end{equation}
+Here $t_c$ denotes the midpoint of segment $c$.
+
+The rationale is straightforward.  The BLIP harmonic basis already describes a linear response to SGWB power.  Under the fixed-$L$ assumption with statistical isotropy in $m$, the only information retained from the set $\{m=-L,\ldots,+L\}$ is the isotropic average over their power.  Equation~\eqref{eq:implemented-fixedL-response-segment} is therefore the natural channel-resolved effective response that multiplies the scalar fixed-$L$ spectrum of Eq.~\eqref{eq:fixedL-spectrum}.
+
+The segment-averaged response used in the likelihood is then
+\begin{equation}
+  \Rsp_{\OO,L}(f)
+  \equiv
+  \frac{1}{\Nc}\sum_{c=1}^{\Nc}\widehat{R}_{\OO,L}(f,t_c).
+  \label{eq:implemented-fixedL-response-average}
+\end{equation}
+The six unordered A/E/T pairs used throughout are
+\begin{equation}
+  \OO \in \{AA,EE,TT,AE,AT,ET\}.
+\end{equation}
+
+\subsection{Normalization check against the isotropic response}
+
+The implementation includes a cross-check of the harmonic normalization.  If one evaluates BLIP's anisotropic response basis at $\ell=0$ and compares it to the isotropic response returned by the dedicated isotropic routine, one finds numerically
+\begin{equation}
+  \Rlm_{\OO,00}(f,t)
+  =
+  \sqrt{4\pi}\,
+  R^{\rm iso}_{\OO}(f,t),
+  \label{eq:response-normalization-check}
+\end{equation}
+in agreement with the conventional normalization $Y_{00}=1/\sqrt{4\pi}$.
+
+\section{Segmented Frequency-Domain Data in BLIP}
+
+\subsection{Existing BLIP data representation}
+
+The new likelihood does not invent a new data system.  It uses BLIP's existing segmented frequency-domain representation.  Let $r_O(f_k,t_c)$ denote the windowed Fourier coefficient of channel $O$ in frequency bin $f_k$ and segment $c$, with BLIP's standard single-sided PSD normalization.  BLIP stores the segment-wise channel correlation matrix as
+\begin{equation}
+  r_{OO^\prime}(f_k,t_c)
+  \equiv
+  r_O^\ast(f_k,t_c)\,r_{O^\prime}(f_k,t_c).
+  \label{eq:rmat-definition}
+\end{equation}
+These objects are the entries of BLIP's internal \texttt{rmat} array.
+
+For time-domain data generated through BLIP's standard pipeline, the segmentation is inherited from the existing FFT machinery and the number of analyzed segments is exactly the number of segment columns stored in \texttt{rmat}.  For the dedicated fixed-$L$ benchmark injection mode used for internal validation, BLIP can additionally construct the segment-averaged fixed-$L$ correlation matrix directly in frequency space, but the likelihood itself still consumes the same \texttt{rmat} data structure and therefore remains fully integrated with the rest of the code.
+
+\subsection{Conversion between $\Omega h^2$ and PSD units}
+
+BLIP's SGWB conversion convention is
+\begin{equation}
+  \sgw(f)
+  =
+  K_{\Omega}(f)\,\Om(f)h^2,
+  \qquad
+  K_{\Omega}(f)
+  \equiv
+  \frac{3}{4f^3}
+  \left(\frac{H_0}{\pi}\right)^2,
+  \label{eq:omega-psd-conversion}
+\end{equation}
+with the BLIP internal choice
+\begin{equation}
+  H_0 = 2.2\times 10^{-18}\ {\rm s}^{-1}.
+\end{equation}
+Therefore,
+\begin{equation}
+  \Om(f)h^2 = \frac{\sgw(f)}{K_{\Omega}(f)}.
+  \label{eq:psd-omega-conversion}
+\end{equation}
+
+\subsection{Channel-resolved fixed-$L$ data product}
+
+The observed data vector used by the new likelihood is the segment-averaged real A/E/T auto- and cross-spectrum written in $\Omega h^2$ units:
+\begin{equation}
+  \Dobs_{\OO,L}(f_k)
+  \equiv
+  \frac{1}{\Nc}
+  \sum_{c=1}^{\Nc}
+  \Re\!\left[
+    \frac{r_{\OO}(f_k,t_c)}{K_{\Omega}(f_k)}
+  \right].
+  \label{eq:data-product}
+\end{equation}
+The corresponding imaginary part,
+\begin{equation}
+  \Dobs^{(\Im)}_{\OO,L}(f_k)
+  \equiv
+  \frac{1}{\Nc}
+  \sum_{c=1}^{\Nc}
+  \Im\!\left[
+    \frac{r_{\OO}(f_k,t_c)}{K_{\Omega}(f_k)}
+  \right],
+\end{equation}
+is retained as a diagnostic but is not included in the default likelihood.  This choice is consistent with the implemented fixed-$L$ response of Eq.~\eqref{eq:implemented-fixedL-response-average}, which is real by construction, and with the A/E/T noise convention adopted below.
+
+\section{Instrument Noise Model}
+
+\subsection{Fundamental noise components}
+
+BLIP's LISA noise model is parameterized by two amplitudes:
+\begin{itemize}[leftmargin=2em]
+  \item $N_{\rm p}$: interferometric/metrology noise,
+  \item $N_{\rm a}$: acceleration noise.
+\end{itemize}
+Their frequency-dependent one-link PSDs are
+\begin{align}
+  S_{\rm p}(f)
+  &= N_{\rm p}\left[1+\left(\frac{2\times 10^{-3}\ {\rm Hz}}{f}\right)^4\right], \\
+  S_{\rm a}(f)
+  &= N_{\rm a}
+     \left(1+\frac{1.6\times 10^{-7}\ {\rm Hz}^2}{f^2}\right)
+     \left[1+\left(\frac{f}{8\times 10^{-3}\ {\rm Hz}}\right)^4\right]
+     \left(\frac{1}{2\pi f}\right)^4.
+  \label{eq:fundamental-noise}
+\end{align}
+
+\subsection{Michelson, XYZ, and A/E/T noise covariance}
+
+Let
+\begin{equation}
+  \fstar \equiv \frac{c}{2\pi \Larm},
+  \qquad
+  \Larm = 2.5\times 10^9\ {\rm m},
+  \qquad
+  f_0 \equiv \frac{f}{2\fstar}.
+\end{equation}
+BLIP first constructs the Michelson covariance matrix,
+\begin{align}
+  C^{\rm Mich}_{ii}(f)
+  &= 4\left[2S_{\rm a}(f)\left(1+\cos^2(2f_0)\right) + S_{\rm p}(f)\right], \\
+  C^{\rm Mich}_{ij}(f)
+  &= \left[-2S_{\rm p}(f)-8S_{\rm a}(f)\right]\cos(2f_0),
+  \qquad i\neq j.
+  \label{eq:mich-noise}
+\end{align}
+It then transforms to the $X,Y,Z$ basis via
+\begin{equation}
+  C^{XYZ}(f) = 4\sin^2(2f_0)\,C^{\rm Mich}(f),
+\end{equation}
+and finally to the A/E/T basis using the same orthogonal coefficients $c_{Oi}$ as in Eq.~\eqref{eq:aet-transform}:
+\begin{equation}
+  C^{AET}_{OO^\prime}(f) = c_{Oi}c_{O^\prime j} C^{XYZ}_{ij}(f).
+  \label{eq:aet-noise-transform}
+\end{equation}
+
+\subsection{Noise in $\Omega h^2$ units}
+
+The noise term that enters the fixed-$L$ theory model is obtained by dividing the A/E/T noise PSD by the same conversion factor $K_{\Omega}(f)$ used for the data product:
+\begin{equation}
+  \Ntil^\Omega_{\OO}(f)
+  =
+  \frac{\Re[C^{AET}_{\OO}(f)]}{K_{\Omega}(f)}.
+  \label{eq:noise-omega}
+\end{equation}
+In the current A/E/T implementation the cross-channel noise contributions are taken to vanish in the default likelihood,
+\begin{equation}
+  \Ntil^\Omega_{AE}(f) = \Ntil^\Omega_{AT}(f) = \Ntil^\Omega_{ET}(f) = 0,
+\end{equation}
+consistent with the adopted BLIP A/E/T convention to numerical precision.
+
+\section{Forward Model for the Channel-Resolved Fixed-$L$ Likelihood}
+
+The channel-resolved theory curve in each frequency bin is
+\begin{equation}
+  \Dth_{\OO,L}(f_k)
+  =
+  \Rsp_{\OO,L}(f_k)\,\OmL(f_k)h^2
+  +
+  \Ntil^\Omega_{\OO}(f_k),
+  \label{eq:theory-curve}
+\end{equation}
+which is the BLIP realization of the Eq.~(5.4)-style ansatz of Ref.~\cite{LISAAnisotropyPaper}.  Every object in Eq.~\eqref{eq:theory-curve} is one-dimensional in frequency for each unique unordered A/E/T pair:
+\begin{itemize}[leftmargin=2em]
+  \item $\Rsp_{\OO,L}(f_k)$ is the segment-averaged fixed-$L$ response of Eq.~\eqref{eq:implemented-fixedL-response-average},
+  \item $\OmL(f_k)h^2$ is the fixed-$L$ spectrum of Eq.~\eqref{eq:fixedL-spectrum},
+  \item $\Ntil^\Omega_{\OO}(f_k)$ is the channel-resolved noise term of Eq.~\eqref{eq:noise-omega}.
+\end{itemize}
+
+\section{Gaussian Likelihood and Posterior Inference}
+
+\subsection{Likelihood}
+
+The likelihood is evaluated over the six unique unordered A/E/T channel pairs and all analyzed frequency bins:
+\begin{equation}
+  \ln \mathcal{L}_L(\vect{\theta})
+  =
+  -\frac{\Nc}{2}
+  \sum_{\OO}
+  \sum_{k}
+  \frac{
+    \left[
+      \Dobs_{\OO,L}(f_k)
+      -
+      \Dth_{\OO,L}(f_k;\vect{\theta})
+    \right]^2
+  }{
+    \sigma^2_{\OO,L}(f_k;\vect{\theta})
+  }.
+  \label{eq:likelihood}
+\end{equation}
+The default variance model is
+\begin{equation}
+  \sigma^2_{\OO,L}(f_k;\vect{\theta})
+  =
+  \left[
+    \Dth_{\OO,L}(f_k;\vect{\theta})
+  \right]^2,
+  \label{eq:variance-model}
+\end{equation}
+which matches the default choice described around Eqs.~(5.3)--(5.4) in Ref.~\cite{LISAAnisotropyPaper}.  In the implementation, a small positive floating-point floor is applied to Eq.~\eqref{eq:variance-model} to avoid division by zero in bins where the theory prediction is numerically tiny.
+
+The number of segments $\Nc$ is \emph{not} an abstract mission parameter in the code; it is the actual number of segment columns present in BLIP's stored correlation matrix.  Hence the normalization of Eq.~\eqref{eq:likelihood} tracks the actual segmented data product used in the analysis.
+
+\subsection{Prior transform}
+
+The unit-cube prior variables $(u_1,u_2,u_3,u_4)\in[0,1]^4$ are mapped to the physical parameters by uniform transforms,
+\begin{align}
+  \log_{10}A_{\rm c} &= a_A + u_1(b_A-a_A), \\
+  \alpha             &= a_\alpha + u_2(b_\alpha-a_\alpha), \\
+  \log N_{\rm p}     &= a_p + u_3(b_p-a_p), \\
+  \log N_{\rm a}     &= a_a + u_4(b_a-a_a),
+\end{align}
+where the interval endpoints are read from the BLIP configuration file.  The default choices are
+\begin{align}
+  \alpha &\in [-5,5], \\
+  \log_{10}A_{\rm c} &\in [-14,-8], \\
+  \log N_{\rm p} &\in [-44,-39], \\
+  \log N_{\rm a} &\in [-51,-46].
+\end{align}
+The parameter ordering is fixed to
+\begin{equation}
+  \vect{\theta}
+  =
+  \left(
+  \log_{10}A_{\rm c},
+  \alpha,
+  \log N_{\rm p},
+  \log N_{\rm a}
+  \right),
+  \label{eq:theta-ordering}
+\end{equation}
+and this ordering is propagated consistently through the BLIP prior transform, the likelihood, the sampler interface, the output labels, and the stored posterior samples.
+
+\subsection{Posterior and evidence}
+
+For a model ${\cal M}_L$ specifying a fixed multipole $L$, the posterior distribution is
+\begin{equation}
+  p(\vect{\theta}\mid \vect{d},{\cal M}_L)
+  =
+  \frac{
+    \mathcal{L}_L(\vect{\theta})\,
+    \pi(\vect{\theta}\mid {\cal M}_L)
+  }{
+    {\cal Z}({\cal M}_L)
+  },
+  \label{eq:posterior}
+\end{equation}
+with evidence
+\begin{equation}
+  {\cal Z}({\cal M}_L)
+  =
+  \int \dd^4\theta\,
+  \mathcal{L}_L(\vect{\theta})\,
+  \pi(\vect{\theta}\mid {\cal M}_L).
+\end{equation}
+
+\subsection{Sampler integration inside BLIP}
+
+The fixed-$L$ extension is integrated into BLIP by overriding only the prior transform and the likelihood for the dedicated model string
+\begin{equation}
+  \texttt{model = noise + powerlaw\_fixedLchannels}.
+\end{equation}
+All other machinery remains BLIP-native:
+\begin{itemize}[leftmargin=2em]
+  \item configuration parsing is handled by \texttt{run\_blip},
+  \item data generation and/or loading use the standard \texttt{LISA} and \texttt{Injection} classes,
+  \item the model object is the standard BLIP \texttt{Model},
+  \item the sampler interface is unchanged.
+\end{itemize}
+Consequently the new mode is compatible with BLIP's existing sampler backends.  In particular, nested sampling with \texttt{dynesty} is invoked through BLIP's usual interface as
+\begin{equation}
+  \texttt{NestedSampler}\!\left(\mathcal{L}_L,\Pi_L,N_{\rm par},\ \texttt{bound='multi'},\ \texttt{sample=...}\right),
+\end{equation}
+with $N_{\rm par}=4$ and with the same checkpointing and posterior-resampling logic used elsewhere in BLIP \cite{SpeagleDynesty}.
+
+\section{Why the New Fixed-$L$ Likelihood Differs from the Legacy BLIP Multipole Path}
+
+It is important to state explicitly what the present extension is \emph{not}.  BLIP's legacy single-multipole mode contracts the anisotropic response basis into the covariance-template kernel
+\begin{equation}
+  K^{\rm legacy}_{ij}(f,t;L)
+  =
+  \frac{1}{2L+1}
+  \sum_{m=-L}^{L}
+  \Rlm_{ik,Lm}(f,t)\,
+  \Rlm^\ast_{jk,Lm}(f,t),
+\end{equation}
+where the repeated detector index is summed over.  This produces a full channel covariance matrix that is then combined with the instrumental noise covariance and passed into a matrix Gaussian likelihood requiring covariance inversion and determinant evaluation.
+
+The present fixed-$L$ extension does not do this for inference.  Instead it:
+\begin{enumerate}[leftmargin=2.5em]
+  \item starts from the direct pairwise A/E/T harmonic response coefficients;
+  \item compresses the fixed-$L$ response pair by pair, using Eq.~\eqref{eq:implemented-fixedL-response-segment};
+  \item builds a channel-resolved spectral data product in $\Omega h^2$ units;
+  \item evaluates the scalar Gaussian likelihood of Eq.~\eqref{eq:likelihood}.
+\end{enumerate}
+Thus the new fixed-$L$ mode is conceptually and computationally distinct from the legacy covariance-template path.
+
+\section{Diagnostics, Validation Quantities, and Reproducibility Outputs}
+
+For every run of the new mode, BLIP stores the following fixed-$L$ diagnostics:
+\begin{itemize}[leftmargin=2em]
+  \item the posterior-median fixed-$L$ signal spectrum $\OmL(f)h^2$;
+  \item the response curves $\Rsp_{\OO,L}(f)$ for all six channel pairs;
+  \item the noise curves $\Ntil^\Omega_{\OO}(f)$;
+  \item the observed data product $\Dobs_{\OO,L}(f)$ together with its segment-wise real and imaginary parts;
+  \item the posterior-median theory curves $\Dth_{\OO,L}(f)$.
+\end{itemize}
+The implementation additionally verifies:
+\begin{enumerate}[leftmargin=2.5em]
+  \item the pivot-frequency normalization $\OmL(\fc)h^2 = 10^{\log_{10}A_{\rm c}}$;
+  \item the derivative identities of Eq.~\eqref{eq:fixedL-derivatives};
+  \item the isotropic normalization check of Eq.~\eqref{eq:response-normalization-check};
+  \item the monotonic dependence of the A/E/T noise curves on $N_{\rm p}$ and $N_{\rm a}$;
+  \item the fact that the fixed-$L$ inference path does not call the legacy \texttt{compute\_Sgw}, covariance-assembly, or covariance-inversion machinery.
+\end{enumerate}
+
+\section{Summary of the Implemented Fixed-$L$ Analysis}
+
+The new fixed-$L$ BLIP extension may be summarized as follows.
+\begin{enumerate}[leftmargin=2.5em]
+  \item A single multipole $L$ is selected.
+  \item The corresponding SGWB spectrum is parameterized by Eq.~\eqref{eq:fixedL-spectrum}.
+  \item BLIP's existing anisotropic A/E/T response basis is evaluated and compressed into the real fixed-$L$ channel responses of Eqs.~\eqref{eq:implemented-fixedL-response-segment}--\eqref{eq:implemented-fixedL-response-average}.
+  \item BLIP's existing segmented frequency-domain data products are converted into the channel-resolved data vector of Eq.~\eqref{eq:data-product}.
+  \item BLIP's existing instrumental-noise model is converted into $\Omega h^2$ units using Eq.~\eqref{eq:noise-omega}.
+  \item The forward model is assembled according to Eq.~\eqref{eq:theory-curve}.
+  \item The posterior is sampled from the four-dimensional model defined by Eqs.~\eqref{eq:likelihood} and \eqref{eq:posterior}, using BLIP's standard sampler interfaces.
+\end{enumerate}
+
+This procedure yields a dedicated fixed-$L$ anisotropy likelihood that is both physically well matched to the single-multipole spectral problem and natively integrated with BLIP's existing response, noise, data, and sampler infrastructure.
+
+\begin{thebibliography}{99}
+
+\bibitem{LISAAnisotropyPaper}
+G.~Cusin, I.~Dandoy, C.~Pitrou and J.~P.~Uzan,
+``Measuring anisotropies of the stochastic gravitational-wave background with LISA,''
+arXiv:2201.08782.
+
+\bibitem{AdamsCornish}
+M.~R.~Adams and N.~J.~Cornish,
+``Discriminating between a stochastic gravitational wave background and instrument noise,''
+Phys.\ Rev.\ D {\bf 82}, 022002 (2010),
+arXiv:1002.1291.
+
+\bibitem{SpeagleDynesty}
+J.~S.~Speagle,
+``dynesty: a dynamic nested sampling package for estimating Bayesian posteriors and evidences,''
+Mon.\ Not.\ Roy.\ Astron.\ Soc.\ {\bf 493}, 3132--3158 (2020),
+arXiv:1904.02180.
+
+\end{thebibliography}
+
+\end{document}
