@@ -1,0 +1,667 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{setspace}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\onehalfspacing
+
+\newcommand{\Om}{\Omega_{\mathrm{GW}}}
+\newcommand{\OmL}{\Omega_{\mathrm{GW}}^{L}}
+\newcommand{\fc}{f_{\mathrm{c}}}
+\newcommand{\fstar}{f_{\ast}}
+\newcommand{\Larm}{L_{\mathrm{arm}}}
+\newcommand{\Rsp}{\widetilde{\mathcal{R}}}
+\newcommand{\Dobs}{\mathcal{D}^{\mathrm{obs}}}
+\newcommand{\Dth}{\mathcal{D}^{\mathrm{th}}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\placeholder}[1]{\textcolor{blue}{[Placeholder: #1]}}
+\newcommand{\placeholderbox}[1]{
+  \begin{center}
+  \fbox{
+    \parbox{0.9\linewidth}{
+      \vspace{0.8em}
+      \centering #1
+      \vspace{0.8em}
+    }
+  }
+  \end{center}
+}
+
+\title{Bayesian Inference for LISA SGWB Anisotropies with BLIP\\
+\large Introduction, Methods, and Results Template for the Implemented Fixed-$L$ Analysis}
+\author{Draft Paper Skeleton}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This draft is a paper-ready \LaTeX{} starting point for describing Bayesian inference of anisotropies in the stochastic gravitational-wave background (SGWB) with the Bayesian LISA Inference Package (BLIP). The document is written to match the current code path that performs anisotropy inference in a physically explicit and sampler-integrated way: the fixed-$L$ channel-resolved likelihood implemented through the model string \texttt{noise+powerlaw\_fixedLchannels}. The analysis targets a single chosen multipole $L$, parameterized by a power-law amplitude and slope, and inferred jointly with the LISA position-noise and acceleration-noise amplitudes. We provide the physical setup, the response construction, the instrumental noise model, the prior transform, the likelihood actually evaluated by the code, the sampler interfaces, the diagnostic products, and a structured results section with placeholders for posterior summaries, figures, evidence values, and physical interpretation. The older single-multipole total-power mode and the full spherical-harmonic mode are mentioned only for context; the present draft is centered on the fixed-$L$ pipeline that the current codebase treats as the rigorous anisotropy likelihood.
+\end{abstract}
+
+\tableofcontents
+
+\section{Introduction}
+
+Anisotropies in the stochastic gravitational-wave background carry information that is complementary to the angle-averaged monopole. In the LISA band, anisotropy measurements are interesting both because they can encode astrophysical structure and because the motion and geometry of the detector modulate the sky response in a way that makes directional information observable. A Bayesian analysis is especially well suited to this problem: it allows one to infer weak correlated signals in the presence of instrument noise, propagate uncertainty in spectral and noise parameters, and compare competing physical hypotheses through posterior distributions and evidences.
+
+BLIP was designed as a general Bayesian package for stochastic-background inference with LISA. The code contains several signal models, multiple sampler backends, and both isotropic and anisotropic response machinery. For anisotropies, however, it is important to distinguish between different inference targets. The current codebase contains a legacy single-multipole mode, \texttt{powerlaw\_multipole}, and a more direct fixed-$L$ channel-resolved mode, \texttt{powerlaw\_fixedLchannels}. The latter is the analysis path described in this document because it is the implementation that explicitly builds a fixed-$L$ spectral data product, uses channel-resolved A/E/T responses, and evaluates a dedicated likelihood in terms of the physically relevant quantities that enter the code.
+
+The scientific target of the implemented analysis is not a sky map and not a free set of spherical-harmonic coefficients. Instead, the code assumes that one multipole $L$ is selected in advance and models the corresponding anisotropic SGWB contribution with a power-law spectrum,
+\begin{equation}
+  \OmL(f) h^2
+  =
+  10^{\log_{10} A_{\mathrm{c}}}
+  \left(\frac{f}{\fc}\right)^{\alpha},
+  \label{eq:intro-fixedL-spectrum}
+\end{equation}
+where $\log_{10} A_{\mathrm{c}}$ is the logarithmic amplitude at the pivot frequency $\fc$ and $\alpha$ is the spectral index. This fixed-$L$ signal is inferred jointly with two instrumental-noise amplitudes, one for position noise and one for acceleration noise.
+
+The goal of this paper is therefore twofold. First, it explains what the code does physically and mathematically: how the LISA response is built, how the data product is defined, how the priors are applied, how the likelihood is evaluated, and how the sampler is connected to the model. Second, it provides a results template that can be populated once production runs have been completed. The structure below is deliberately close to manuscript form, so it can be used as the basis for an actual paper rather than only as internal notes.
+
+\section{Analysis Target and Scope}
+
+\subsection{Angular description of the anisotropic background}
+
+Let $\hat{\vect{n}}$ denote a sky direction. A generic anisotropic SGWB energy-density field may be expanded as
+\begin{equation}
+  \Om(f,\hat{\vect{n}}) h^2
+  =
+  \sum_{\ell=0}^{\infty}
+  \sum_{m=-\ell}^{\ell}
+  \Om_{\ell m}(f) h^2 \, Y_{\ell m}(\hat{\vect{n}}).
+\end{equation}
+In the fixed-$L$ analysis implemented in BLIP, one retains only a single chosen multipole $\ell=L$ and assumes that the relevant information can be compressed into one effective spectral amplitude and slope rather than a freely sampled set of mode coefficients. The sampled parameter vector is
+\begin{equation}
+  \vect{\theta}
+  =
+  \left(
+    \log_{10} A_{\mathrm{c}},
+    \alpha,
+    \log_{10} N_{\mathrm{p}},
+    \log_{10} N_{\mathrm{a}}
+  \right),
+  \label{eq:theta-definition}
+\end{equation}
+where $N_{\mathrm{p}}$ and $N_{\mathrm{a}}$ are the position-noise and acceleration-noise amplitudes used by BLIP's instrumental model.
+
+\subsection{What this paper does and does not cover}
+
+This draft describes the current fixed-$L$ anisotropy path in the code:
+\begin{center}
+\texttt{model = noise + powerlaw\_fixedLchannels}
+\end{center}
+It does not describe a full sky-map reconstruction, because the implemented fixed-$L$ mode does not sample $b_{\ell m}$ or $a_{\ell m}$ coefficients. It also does not use the legacy covariance-template contraction employed by \texttt{powerlaw\_multipole}. If a future paper is instead intended to focus on the full spherical-harmonic mode (\texttt{powerlaw\_sph}), then additional sections on coefficient priors, sky-map reconstruction, and the associated covariance model should be added separately.
+
+\section{Methods}
+
+\subsection{Physical signal model}
+
+The fixed-$L$ SGWB spectrum is modeled as
+\begin{equation}
+  \OmL(f) h^2
+  =
+  10^{\log_{10} A_{\mathrm{c}}}
+  \left(\frac{f}{\fc}\right)^{\alpha},
+  \label{eq:fixedL-spectrum}
+\end{equation}
+with default pivot frequency
+\begin{equation}
+  \fc = 2.5 \times 10^{-3}~\mathrm{Hz}.
+\end{equation}
+The selected multipole $L$ is not sampled; it is fixed by the configuration parameter \texttt{fixedL}. For validation and diagnostic purposes, the code also evaluates
+\begin{align}
+  \frac{\partial (\OmL h^2)}{\partial \log_{10} A_{\mathrm{c}}}
+  &= \ln(10)\,\OmL h^2, \\
+  \frac{\partial (\OmL h^2)}{\partial \alpha}
+  &= \ln\!\left(\frac{f}{\fc}\right)\,\OmL h^2.
+\end{align}
+
+\subsection{LISA geometry and anisotropic response construction}
+
+The anisotropic response used by the code is generated by evaluating the time-dependent LISA geometry at the midpoint of each data segment and integrating the polarization-averaged directional power response over the sky. In practice, BLIP performs the sky integral numerically on a HEALPix grid with resolution set by \texttt{nside}. The anisotropic response basis for a channel pair $OO'$ is
+\begin{equation}
+  \mathcal{R}_{OO',\ell m}(f,t_c)
+  =
+  \frac{1}{2}
+  \int \dd^2 \hat{\vect{n}}\,
+  \Gamma_{OO'}(f,t_c,\hat{\vect{n}})
+  Y_{\ell m}(\hat{\vect{n}}),
+  \label{eq:response-basis}
+\end{equation}
+where $\Gamma_{OO'}$ is the directional power response averaged over plus and cross polarizations and $t_c$ is the midpoint of segment $c$.
+
+The code builds this response hierarchically:
+\begin{enumerate}[leftmargin=2.2em]
+  \item it computes the Michelson-like anisotropic response on the sky;
+  \item it transforms that response to the $X,Y,Z$ TDI basis;
+  \item it rotates the result to the orthogonal A/E/T basis;
+  \item it compresses the chosen multipole $L$ into a direct per-pair fixed-$L$ response.
+\end{enumerate}
+
+The A/E/T channels are defined from the $X,Y,Z$ channels as
+\begin{align}
+  A &= \frac{1}{3}(2X-Y-Z), \\
+  E &= \frac{1}{\sqrt{3}}(Z-Y), \\
+  T &= \frac{1}{3}(X+Y+Z).
+\end{align}
+The same linear combinations are used both for the signal response and for the instrumental-noise covariance.
+
+\subsection{Fixed-$L$ response compression}
+
+For the dedicated fixed-$L$ likelihood, the code does not use the older hidden-index covariance contraction. Instead, for each unique unordered A/E/T pair,
+\begin{equation}
+  OO' \in \{AA, EE, TT, AE, AT, ET\},
+\end{equation}
+it forms a real effective response by averaging the squared modulus of the selected $m$-mode coefficients:
+\begin{equation}
+  \Rsp_{OO',L}(f,t_c)
+  =
+  \frac{1}{2L+1}
+  \sum_{m=-L}^{L}
+  \left|
+    \mathcal{R}_{OO',Lm}(f,t_c)
+  \right|^2.
+  \label{eq:fixedL-response-segment}
+\end{equation}
+The segment-averaged response used in the theory model is then
+\begin{equation}
+  \Rsp_{OO',L}(f)
+  =
+  \frac{1}{N_c}
+  \sum_{c=1}^{N_c}
+  \Rsp_{OO',L}(f,t_c),
+  \label{eq:fixedL-response-average}
+\end{equation}
+where $N_c$ is the number of analyzed data segments.
+
+This is an important point to state clearly in the manuscript: the fixed-$L$ likelihood implemented in the code is a \emph{channel-resolved spectral likelihood}, not a likelihood on a full covariance template assembled from a different contraction of the harmonic response. The response object in Eq.~\eqref{eq:fixedL-response-average} is the quantity that actually multiplies the scalar fixed-$L$ spectrum in the current analysis.
+
+\subsection{Instrument noise model}
+
+BLIP parameterizes the instrumental noise with two amplitudes. The one-link position-noise and acceleration-noise spectra are
+\begin{align}
+  S_{\mathrm{p}}(f)
+  &=
+  N_{\mathrm{p}}
+  \left[
+    1 + \left(\frac{2 \times 10^{-3}\,\mathrm{Hz}}{f}\right)^4
+  \right], \\
+  S_{\mathrm{a}}(f)
+  &=
+  N_{\mathrm{a}}
+  \left(
+    1 + \frac{1.6 \times 10^{-7}\,\mathrm{Hz}^2}{f^2}
+  \right)
+  \left[
+    1 + \left(\frac{f}{8 \times 10^{-3}\,\mathrm{Hz}}\right)^4
+  \right]
+  \left(\frac{1}{2\pi f}\right)^4.
+  \label{eq:fundamental-noise}
+\end{align}
+
+Let
+\begin{equation}
+  \fstar = \frac{c}{2\pi \Larm},
+  \qquad
+  \Larm = 2.5 \times 10^9~\mathrm{m},
+  \qquad
+  f_0 = \frac{f}{2\fstar}.
+\end{equation}
+The Michelson noise covariance is
+\begin{align}
+  C_{ii}^{\mathrm{Mich}}(f)
+  &=
+  4\left[
+    2S_{\mathrm{a}}(f)\left(1+\cos^2(2f_0)\right) + S_{\mathrm{p}}(f)
+  \right], \\
+  C_{ij}^{\mathrm{Mich}}(f)
+  &=
+  \left[-2S_{\mathrm{p}}(f)-8S_{\mathrm{a}}(f)\right]\cos(2f_0),
+  \qquad i\neq j.
+\end{align}
+The code then transforms to $X,Y,Z$ using
+\begin{equation}
+  C^{XYZ}(f) = 4\sin^2(2f_0)\,C^{\mathrm{Mich}}(f),
+\end{equation}
+and finally to A/E/T using the same linear combinations used for the signal channels.
+
+\subsection{Conversion between PSD units and $\Omega h^2$ units}
+
+BLIP uses the conversion
+\begin{equation}
+  S_{\mathrm{GW}}(f)
+  =
+  K_{\Omega}(f)\,\Om(f) h^2,
+  \qquad
+  K_{\Omega}(f)
+  =
+  \frac{3}{4f^3}\left(\frac{H_0}{\pi}\right)^2,
+\end{equation}
+with internal convention
+\begin{equation}
+  H_0 = 2.2 \times 10^{-18}~\mathrm{s}^{-1}.
+\end{equation}
+The fixed-$L$ analysis writes both the data product and the instrumental-noise contribution in $\Omega h^2$ units by dividing the relevant cross-spectra or noise PSDs by $K_{\Omega}(f)$.
+
+\subsection{Segmented data product}
+
+BLIP stores segmented frequency-domain correlations in the array usually denoted \texttt{rmat}. For channel pair $OO'$ and segment $c$,
+\begin{equation}
+  r_{OO'}(f_k,t_c)
+  =
+  r_O^{\ast}(f_k,t_c)\,r_{O'}(f_k,t_c).
+\end{equation}
+The fixed-$L$ likelihood converts these objects into a real-valued channel-resolved data vector,
+\begin{equation}
+  \Dobs_{OO',L}(f_k)
+  =
+  \frac{1}{N_c}
+  \sum_{c=1}^{N_c}
+  \Re\!\left[
+    \frac{r_{OO'}(f_k,t_c)}{K_{\Omega}(f_k)}
+  \right].
+  \label{eq:data-product}
+\end{equation}
+The imaginary part,
+\begin{equation}
+  \Dobs^{(\Im)}_{OO',L}(f_k)
+  =
+  \frac{1}{N_c}
+  \sum_{c=1}^{N_c}
+  \Im\!\left[
+    \frac{r_{OO'}(f_k,t_c)}{K_{\Omega}(f_k)}
+  \right],
+\end{equation}
+is retained for diagnostics and written to the output files, but it is not part of the default likelihood.
+
+\subsection{Benchmark injections and synthetic data generation}
+
+The code supports two ways of generating fixed-$L$ benchmark injections for validation:
+\begin{enumerate}[leftmargin=2.2em]
+  \item \texttt{fixedL\_injection\_mode = mean\_rmat}: the code directly sets the stored correlation matrix equal to the model covariance in each frequency bin and segment. This produces a deterministic benchmark in which the frequency-domain data product exactly matches the injected mean.
+  \item \texttt{fixedL\_injection\_mode = stochastic\_segments}: the code draws complex Gaussian segment realizations from the segment-wise covariance using a Cholesky factorization. This produces stochastic segment-level fluctuations around the injected mean model.
+\end{enumerate}
+For manuscript purposes, it is useful to state explicitly which mode was used for each run, because the deterministic benchmark is ideal for pipeline validation whereas the stochastic mode is closer to a realistic mock-data study.
+
+\subsection{Forward model}
+
+Given the parameter vector in Eq.~\eqref{eq:theta-definition}, the theory prediction for each channel pair is
+\begin{equation}
+  \Dth_{OO',L}(f_k;\vect{\theta})
+  =
+  \Rsp_{OO',L}(f_k)\,\OmL(f_k) h^2
+  +
+  \mathcal{N}^{\Omega}_{OO'}(f_k),
+  \label{eq:theory-curve}
+\end{equation}
+where $\mathcal{N}^{\Omega}_{OO'}(f)$ denotes the A/E/T instrumental-noise contribution converted into $\Omega h^2$ units. In the present implementation, the cross-channel noise terms $AE$, $AT$, and $ET$ are set to zero in the fixed-$L$ likelihood after checking that they vanish or are numerically negligible in the adopted A/E/T convention.
+
+\subsection{Prior model}
+
+The code applies independent uniform priors read from the \texttt{[priors]} section of the configuration file. If the unit-cube variables are $\vect{u}=(u_1,u_2,u_3,u_4)$ with each $u_i \in [0,1]$, then the prior transform is
+\begin{align}
+  \log_{10} A_{\mathrm{c}} &= a_A + u_1(b_A-a_A), \\
+  \alpha                  &= a_{\alpha} + u_2(b_{\alpha}-a_{\alpha}), \\
+  \log_{10} N_{\mathrm{p}} &= a_p + u_3(b_p-a_p), \\
+  \log_{10} N_{\mathrm{a}} &= a_a + u_4(b_a-a_a).
+  \label{eq:prior-transform}
+\end{align}
+Equivalently, the prior density is
+\begin{equation}
+  \pi(\vect{\theta})
+  =
+  \prod_{i=1}^{4}
+  \frac{1}{b_i-a_i}
+  \,\mathbf{1}_{[a_i,b_i]}(\theta_i).
+\end{equation}
+
+The production-like default bounds currently used in the code are
+\begin{align}
+  \log_{10} A_{\mathrm{c}} &\in [-14,-8], \\
+  \alpha &\in [-5,5], \\
+  \log_{10} N_{\mathrm{p}} &\in [-44,-39], \\
+  \log_{10} N_{\mathrm{a}} &\in [-51,-46].
+\end{align}
+For smoke tests, narrower bounds may be used. Since the code parses these ranges from the configuration file, the paper should always report the exact bounds used in the final runs.
+
+\begin{table}[t]
+\centering
+\caption{Default fixed-$L$ prior ranges in the current BLIP implementation. These values are configuration-dependent and should be replaced by the actual production bounds used in the analysis.}
+\begin{tabular}{lll}
+\toprule
+Parameter & Physical meaning & Example prior interval \\
+\midrule
+$\log_{10} A_{\mathrm{c}}$ & Fixed-$L$ amplitude at $\fc$ & $[-14,-8]$ \\
+$\alpha$ & Spectral slope & $[-5,5]$ \\
+$\log_{10} N_{\mathrm{p}}$ & Position-noise amplitude & $[-44,-39]$ \\
+$\log_{10} N_{\mathrm{a}}$ & Acceleration-noise amplitude & $[-51,-46]$ \\
+\bottomrule
+\end{tabular}
+\label{tab:priors}
+\end{table}
+
+\subsection{Likelihood function}
+
+The fixed-$L$ mode uses a channel-resolved quadratic log-likelihood over the six unique A/E/T pairs and all analyzed frequency bins:
+\begin{equation}
+  \ln \mathcal{L}_{\mathrm{code}}(\vect{\theta})
+  =
+  -\frac{N_c}{2}
+  \sum_{OO'}
+  \sum_{k}
+  \frac{
+    \left[
+      \Dobs_{OO',L}(f_k)
+      -
+      \Dth_{OO',L}(f_k;\vect{\theta})
+    \right]^2
+  }{
+    \sigma^2_{OO',L}(f_k;\vect{\theta})
+  }.
+  \label{eq:implemented-likelihood}
+\end{equation}
+The implemented variance model is
+\begin{equation}
+  \sigma^2_{OO',L}(f_k;\vect{\theta})
+  =
+  \max\!\left(
+    \Dth_{OO',L}(f_k;\vect{\theta})^2,
+    \epsilon_{\mathrm{mach}}
+  \right),
+  \label{eq:implemented-variance}
+\end{equation}
+where $\epsilon_{\mathrm{mach}}$ is a tiny positive floating-point floor used to avoid division by zero.
+
+For transparency, the paper should note one implementation detail explicitly: Eq.~\eqref{eq:implemented-likelihood} is the \emph{exact objective currently evaluated by the code}. It is Gaussian-inspired, but the implementation does \emph{not} include the additive normalization term
+\begin{equation}
+  -\frac{1}{2}\sum_{OO',k}\ln\!\big(2\pi \sigma^2_{OO',L}(f_k;\vect{\theta})\big),
+\end{equation}
+which would appear in a fully normalized Gaussian likelihood with theory-dependent variance. If the manuscript is intended to document the code literally, Eq.~\eqref{eq:implemented-likelihood} should be presented as written. If instead the goal is to motivate a future statistically normalized likelihood, that distinction should be stated carefully.
+
+\subsection{Posterior distribution}
+
+For a fixed choice of multipole $L$, the posterior is
+\begin{equation}
+  p(\vect{\theta}\mid \vect{d}, \mathcal{M}_L)
+  =
+  \frac{
+    \mathcal{L}_{\mathrm{code}}(\vect{\theta})\,
+    \pi(\vect{\theta}\mid \mathcal{M}_L)
+  }{
+    \mathcal{Z}(\mathcal{M}_L)
+  },
+\end{equation}
+with evidence
+\begin{equation}
+  \mathcal{Z}(\mathcal{M}_L)
+  =
+  \int \dd^4\theta\,
+  \mathcal{L}_{\mathrm{code}}(\vect{\theta})\,
+  \pi(\vect{\theta}\mid \mathcal{M}_L).
+\end{equation}
+In practice, evidence estimates are available only for the nested-sampling backends used by the code.
+
+\subsection{Sampler implementations}
+
+The fixed-$L$ mode reuses BLIP's sampler interface without introducing a new frontend. The code supports three samplers.
+
+\paragraph{dynesty.}
+The default production backend is \texttt{dynesty}. BLIP instantiates
+\begin{equation}
+  \text{\texttt{NestedSampler}}
+  \big(
+    \mathcal{L}_{\mathrm{code}},
+    \Pi,
+    N_{\mathrm{par}}
+  \big),
+\end{equation}
+with $N_{\mathrm{par}}=4$, \texttt{bound='multi'}, a configurable \texttt{sample} method such as \texttt{rwalk} or \texttt{rslice}, and a user-specified number of live points \texttt{nlive}. The posterior samples written by the code are equal-weight resamples of the nested-sampling output, and the evidence and its estimated uncertainty are saved as \texttt{logz.txt} and \texttt{logzerr.txt}.
+
+\paragraph{emcee.}
+The code also supports \texttt{emcee}. In this case the walkers evolve on the unit cube and are mapped to the physical parameter space through the same prior transform used by the nested samplers. BLIP currently uses the \texttt{StretchMove} proposal with parameter $a=2.0$. The run parameters \texttt{Nburn} and \texttt{Nsamples} control burn-in and retained samples. In the current wrapper, the configuration variable named \texttt{nlive} is reused as the number of ensemble walkers. This backend returns posterior samples but not Bayesian evidence.
+
+\paragraph{nessai.}
+The third backend is \texttt{nessai}, which performs nested sampling using a learned flow-based proposal. BLIP wraps the fixed-$L$ likelihood and prior transform in a \texttt{nessai} model defined on the unit cube. The code exposes the number of live points, checkpointing controls, and basic flow-network size choices through the configuration file. Like \texttt{dynesty}, this backend returns both posterior samples and an evidence estimate.
+
+\subsection{Implementation-level analysis pipeline}
+
+For clarity, the manuscript can summarize the implemented workflow as follows:
+\begin{enumerate}[leftmargin=2.2em]
+  \item parse the configuration file and choose the model, frequency range, priors, and sampler;
+  \item generate or load the segmented frequency-domain data;
+  \item build the anisotropic A/E/T response basis on the HEALPix sky over the selected data segments;
+  \item compress the chosen multipole into the fixed-$L$ per-pair responses of Eq.~\eqref{eq:fixedL-response-average};
+  \item build the channel-resolved data vector in $\Omega h^2$ units;
+  \item evaluate the theory curves from the signal model and the instrumental-noise model;
+  \item sample the posterior over $\left(\log_{10} A_{\mathrm{c}}, \alpha, \log_{10} N_{\mathrm{p}}, \log_{10} N_{\mathrm{a}}\right)$;
+  \item save posterior samples, corner plots, signal/noise diagnostics, and channel-by-channel theory curves.
+\end{enumerate}
+
+\subsection{Diagnostics and reproducibility products}
+
+In addition to the posterior samples, the code saves fixed-$L$ diagnostic products that are useful to document in the paper:
+\begin{itemize}[leftmargin=2.2em]
+  \item \texttt{post\_samples.txt}: posterior samples in physical parameter space;
+  \item \texttt{corners.png}: posterior corner plot;
+  \item \texttt{fixedL\_signal\_omega.npz}: posterior-median fixed-$L$ signal spectrum and analytic derivatives;
+  \item \texttt{fixedL\_channel\_response.npz}: fixed-$L$ response curves for $AA$, $EE$, $TT$, $AE$, $AT$, and $ET$;
+  \item \texttt{fixedL\_channel\_noise\_omega.npz}: channel-resolved noise curves in $\Omega h^2$ units;
+  \item \texttt{fixedL\_channel\_data.npz}: data products, including real and imaginary channel spectra and segment-level quantities;
+  \item \texttt{fixedL\_channel\_theory.npz}: posterior-median channel theory curves.
+\end{itemize}
+
+These outputs make it possible to populate both the main results figures and several validation plots directly from the saved run directory.
+
+\subsection{Assumptions that should be stated explicitly}
+
+To keep the paper aligned with the code, the following assumptions should be stated in the methods section:
+\begin{itemize}[leftmargin=2.2em]
+  \item one multipole $L$ is fixed before the run rather than sampled hierarchically;
+  \item the analysis is carried out in the A/E/T basis only;
+  \item the fixed-$L$ likelihood currently supports exactly one SGWB component plus instrumental noise;
+  \item the channel likelihood is built from the real part of the segment-averaged cross-spectra;
+  \item the cross-channel instrumental-noise terms are set to zero in the default fixed-$L$ likelihood;
+  \item the variance model is proportional to the square of the theory prediction;
+  \item evidence values are available only when a nested sampler is used.
+\end{itemize}
+
+\section{Results}
+
+This section is intentionally written as a scaffold. Replace the placeholder text, numbers, and figures with the actual results from the production runs.
+
+\subsection{Dataset and run configuration}
+
+State the exact analysis setup: the selected multipole $L$, the observing duration, the frequency range, the segment length, the choice of \texttt{nside}, the injection mode, the sampler backend, the number of live points or walkers, the random seed policy, and the prior bounds. If multiple configurations were used, separate the validation runs from the production runs.
+
+\begin{table}[t]
+\centering
+\caption{Placeholder summary of the fiducial run configuration. Replace all entries with the exact values used in the final analysis.}
+\begin{tabular}{ll}
+\toprule
+Quantity & Value \\
+\midrule
+Selected multipole $L$ & \placeholder{e.g.\ 2} \\
+Frequency range & \placeholder{e.g.\ $8\times10^{-4}$--$5\times10^{-3}$ Hz} \\
+Observation time & \placeholder{e.g.\ $8\times10^{5}$ s or 3 years} \\
+Segment length & \placeholder{e.g.\ $10^{5}$ s or $10^{6}$ s} \\
+HEALPix resolution & \placeholder{e.g.\ $n_{\mathrm{side}}=2$ or 4} \\
+Sampler & \placeholder{dynesty / nessai / emcee} \\
+Sampler setting & \placeholder{e.g.\ $n_{\mathrm{live}}=400$, \texttt{sample=rslice}} \\
+Injection mode & \placeholder{mean\_rmat / stochastic\_segments / external data} \\
+Prior ranges & \placeholder{quote actual intervals from the ini file} \\
+\bottomrule
+\end{tabular}
+\label{tab:runconfig}
+\end{table}
+
+\subsection{Posterior constraints}
+
+Report the marginalized posterior summaries for $\log_{10} A_{\mathrm{c}}$, $\alpha$, $\log_{10} N_{\mathrm{p}}$, and $\log_{10} N_{\mathrm{a}}$. A concise summary table should list posterior medians and central credible intervals. If the run is a recovery test with known injections, explicitly compare the recovered intervals with the injected values.
+
+\begin{table}[t]
+\centering
+\caption{Placeholder posterior summary table. Replace the entries with the measured posterior medians and credible intervals.}
+\begin{tabular}{llll}
+\toprule
+Parameter & Injection truth & Posterior median & Credible interval \\
+\midrule
+$\log_{10} A_{\mathrm{c}}$ & \placeholder{value} & \placeholder{value} & \placeholder{68\% or 95\% interval} \\
+$\alpha$ & \placeholder{value} & \placeholder{value} & \placeholder{68\% or 95\% interval} \\
+$\log_{10} N_{\mathrm{p}}$ & \placeholder{value} & \placeholder{value} & \placeholder{68\% or 95\% interval} \\
+$\log_{10} N_{\mathrm{a}}$ & \placeholder{value} & \placeholder{value} & \placeholder{68\% or 95\% interval} \\
+\bottomrule
+\end{tabular}
+\label{tab:posteriors}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\placeholderbox{Insert the corner plot generated by \texttt{corners.png}. Describe the dominant parameter degeneracies, whether the injected values lie within the posterior support, and whether the priors are informative in any direction.}
+\caption{Placeholder for the posterior corner plot of the fixed-$L$ analysis.}
+\label{fig:corner}
+\end{figure}
+
+\subsection{Channel-by-channel data versus theory}
+
+Show how the posterior-median theory curves compare with the data in each unique A/E/T pair. This is one of the most direct ways to demonstrate that the likelihood is fitting the frequency dependence and not only producing acceptable marginal posteriors. The saved files \texttt{fixedL\_channel\_data.npz} and \texttt{fixedL\_channel\_theory.npz} can be used directly for this figure.
+
+\begin{figure}[t]
+\centering
+\placeholderbox{Insert a $2\times 3$ panel figure for $AA$, $EE$, $TT$, $AE$, $AT$, and $ET$, showing data, posterior-median theory, and the noise contribution. Add residual panels if desired.}
+\caption{Placeholder for the channel-resolved comparison between data and the posterior-median theory model.}
+\label{fig:channel-fit}
+\end{figure}
+
+In the text, comment on the following:
+\begin{itemize}[leftmargin=2.2em]
+  \item which channels carry most of the constraining power;
+  \item whether the signal is primarily detected through auto-power or also through cross-power;
+  \item where the noise model dominates and where the anisotropic signal contributes visibly;
+  \item whether any channels show systematic residual structure.
+\end{itemize}
+
+\subsection{Recovered fixed-$L$ signal spectrum}
+
+Plot the recovered fixed-$L$ signal spectrum $\OmL(f)h^2$ together with the injected spectrum if the study uses synthetic data. Discuss the recovered amplitude at the pivot frequency and the inferred slope across the analysis band.
+
+\begin{figure}[t]
+\centering
+\placeholderbox{Insert the recovered fixed-$L$ signal spectrum using \texttt{fixedL\_signal\_omega.npz}. If applicable, overplot the injected spectrum and shade the posterior credible band.}
+\caption{Placeholder for the recovered fixed-$L$ SGWB spectrum.}
+\label{fig:signal-spectrum}
+\end{figure}
+
+\subsection{Evidence and model comparison}
+
+If nested sampling was used, quote the evidence values and any Bayes factors of interest. Natural comparisons include:
+\begin{itemize}[leftmargin=2.2em]
+  \item fixed-$L$ signal plus noise versus noise only;
+  \item one fixed multipole versus another fixed multipole;
+  \item narrow priors versus broad priors as a robustness test.
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\caption{Placeholder evidence table. Replace with actual $\ln \mathcal{Z}$ values and Bayes factors from nested-sampling runs.}
+\begin{tabular}{lll}
+\toprule
+Model & $\ln \mathcal{Z}$ & Comparison statistic \\
+\midrule
+Noise only & \placeholder{value} & \placeholder{reference} \\
+Noise + fixed-$L$ signal & \placeholder{value} & \placeholder{$\ln \mathcal{B}$} \\
+Alternative $L$ or alternative prior & \placeholder{value} & \placeholder{$\Delta \ln \mathcal{Z}$} \\
+\bottomrule
+\end{tabular}
+\label{tab:evidence}
+\end{table}
+
+If \texttt{emcee} was used, state clearly that no evidence estimate is available from that backend and restrict the discussion to posterior inference and posterior predictive checks.
+
+\subsection{Robustness and validation checks}
+
+This subsection should summarize the tests that demonstrate the analysis is numerically and physically reliable. Relevant checks include:
+\begin{itemize}[leftmargin=2.2em]
+  \item recovery of injected parameters for deterministic \texttt{mean\_rmat} benchmarks;
+  \item repeatability across random seeds for stochastic-segment injections;
+  \item stability of the posterior under moderate changes in prior width;
+  \item agreement between sampler backends where comparable runs were performed;
+  \item expected normalization of the $\ell=0$ anisotropic response relative to the isotropic response;
+  \item absence of unexplained structure in the imaginary channel diagnostics.
+\end{itemize}
+
+Summarize each test in one or two sentences and point to the corresponding appendix or supplementary figure if the full details are too long for the main text.
+
+\subsection{Physical interpretation}
+
+End the results section by translating the posterior into a physical statement. Examples of points to include are:
+\begin{itemize}[leftmargin=2.2em]
+  \item whether the data prefer a nonzero anisotropic component at the selected multipole;
+  \item the recovered amplitude at the pivot frequency and its uncertainty;
+  \item whether the slope is consistent with the injected or theoretically expected value;
+  \item how strongly the result depends on the noise-parameter uncertainties;
+  \item whether the recovered signal is astrophysically plausible in the LISA band.
+\end{itemize}
+
+\paragraph{Suggested placeholder paragraph.}
+\placeholder{The fixed-$L$ analysis recovers a posterior concentrated around $\log_{10} A_{\mathrm{c}} = \cdots$ and $\alpha = \cdots$, consistent with the injected values within the quoted credible intervals. The channel-by-channel comparison shows that the constraining power is dominated by \cdots, while the evidence difference relative to the noise-only model is $\cdots$, indicating \cdots support for an anisotropic SGWB component at multipole $L=\cdots$.}
+
+\section*{Notes for Finalization}
+
+Before circulating the paper draft, replace the placeholders above and verify that the methods text matches the exact run products used in the final figures. In particular, check that the reported priors, sampler settings, injection mode, observing duration, and frequency range agree with the chosen configuration file. If the final paper uses the literal code likelihood, keep the discussion around Eq.~\eqref{eq:implemented-likelihood} as written; if the likelihood is revised in code before submission, update that subsection to match the new implementation.
+
+\begin{thebibliography}{99}
+
+\bibitem{CusinEtAl}
+G.~Cusin, I.~Dandoy, C.~Pitrou and J.~P.~Uzan,
+``Measuring anisotropies of the stochastic gravitational-wave background with LISA,''
+arXiv:2201.08782.
+
+\bibitem{AdamsCornish}
+M.~R.~Adams and N.~J.~Cornish,
+``Discriminating between a stochastic gravitational wave background and instrument noise,''
+Phys.\ Rev.\ D {\bf 82}, 022002 (2010),
+arXiv:1002.1291.
+
+\bibitem{Dynesty}
+J.~S.~Speagle,
+``dynesty: a dynamic nested sampling package for estimating Bayesian posteriors and evidences,''
+Mon.\ Not.\ Roy.\ Astron.\ Soc.\ {\bf 493}, 3132--3158 (2020),
+arXiv:1904.02180.
+
+\bibitem{Emcee}
+D.~Foreman-Mackey, D.~W.~Hogg, D.~Lang and J.~Goodman,
+``emcee: The MCMC Hammer,''
+Publ.\ Astron.\ Soc.\ Pac.\ {\bf 125}, 306--312 (2013),
+arXiv:1202.3665.
+
+\bibitem{Nessai}
+M.~J.~Williams, J.~Veitch and C.~Messenger,
+``Nested sampling with normalizing flows for gravitational-wave inference,''
+Phys.\ Rev.\ D {\bf 103}, 103006 (2021),
+arXiv:2102.11056.
+
+\bibitem{BLIP}
+\placeholder{Insert the BLIP software citation or repository citation here.}
+
+\end{thebibliography}
+
+\end{document}
