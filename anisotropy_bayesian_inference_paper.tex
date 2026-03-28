@@ -35,7 +35,7 @@ f_{\max}=3\times10^{-3}\ \mathrm{Hz}, \qquad
 T_{\mathrm{obs}}=2\times10^{6}\ \mathrm{s}, \qquad
 T_{\mathrm{seg}}=10^{5}\ \mathrm{s},
 \end{equation}
-with the \texttt{xyz} TDI channels, \texttt{nside}=4 for the sky integration, and a fixed multipole choice such as $L=2$.
+with the \texttt{aet} TDI channels, \texttt{nside}=4 for the sky integration, and a fixed multipole choice such as $L=2$.
 
 The code can either load external data or simulate it. When external time series are loaded, BLIP optionally converts Doppler observables to strain-like variables. When injections are simulated, the code constructs three TDI channels, adds instrumental noise, and then adds SGWB realizations consistent with the model covariance. The characteristic LISA transfer-frequency scale is
 \begin{equation}
@@ -81,7 +81,7 @@ The basic SGWB spectrum used in the anisotropy analyses considered here is a pow
 \begin{equation}
 \Omega(f)=A\left(\frac{f}{f_{\mathrm{ref}}}\right)^{\alpha},
 \end{equation}
-where $A$ is either the isotropic amplitude $\Omega_0$ or, in the single-multipole mode, the total-power amplitude $A_L$. The code also supports broken and truncated power laws, but the power-law case is the most relevant for the anisotropy examples presently configured.
+where $A$ is a shorthand symbol rather than a literal BLIP parameter name. In the isotropic model (\texttt{powerlaw\_isgwb}) and in the full spherical-harmonic anisotropy model (\texttt{powerlaw\_sph}), BLIP samples the spectral amplitude as $\log_{10}\Omega_0$. In the reduced fixed-$L$ model (\texttt{powerlaw\_multipole}), BLIP instead samples $\log_{10}A_L$. The frequency dependence is the same in all three cases; what changes is the spatial object that this amplitude multiplies. The code also supports broken and truncated power laws, but the power-law case is the most relevant for the anisotropy examples presently configured.
 
 BLIP converts $\Omega(f)$ to a strain power spectral density using
 \begin{equation}
@@ -91,6 +91,24 @@ with $H_0=2.2\times10^{-18}\ \mathrm{s}^{-1}$ in the implementation. The total S
 \begin{equation}
 \mathbf{C}_{\mathrm{gw}}(f_k,t_n)=S_{\mathrm{gw}}(f_k)\,\mathbf{R}(f_k,t_n).
 \end{equation}
+To make the amplitude conventions explicit, Table~\ref{tab:amplitude_conventions} summarizes what BLIP is actually sampling under the hood in each spatial mode.
+
+\begin{table}[H]
+\centering
+\caption{Amplitude conventions for the power-law SGWB models used in BLIP.}
+\label{tab:amplitude_conventions}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.23\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}}
+\toprule
+Mode & Sampled amplitude & Additional spatial parameters & Covariance actually evaluated \\
+\midrule
+Isotropic \texttt{powerlaw\_isgwb} & $\log_{10}\Omega_0$ & none & $S_{\mathrm{gw}}(\alpha,\Omega_0)\,\mathbf{R}_{\mathrm{iso}}$ \\
+Full anisotropic \texttt{powerlaw\_sph} & $\log_{10}\Omega_0$ & $b_{\ell m}$ & $S_{\mathrm{gw}}(\alpha,\Omega_0)\,\sum_{LM}\mathbf{R}^{LM}\tilde{a}_{LM}(\bm{b})$ \\
+Fixed-$L$ \texttt{powerlaw\_multipole} & $\log_{10}A_L$ & fixed choice of $L$ only & $S_{\mathrm{gw}}(\alpha,A_L)\,\mathbf{R}^{(L)}_{\mathrm{eff}}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The important distinction is that $\Omega_0$ is an overall spectral normalization, whereas $A_L$ is the total power assigned to one preselected angular multipole after the $m$-modes have been marginalized over. Thus the symbol $A$ means ``the relevant sampled amplitude for the chosen spatial model,'' not one universal parameter shared identically by every model.
 
 \subsection{LISA Orbital Response and Anisotropy Basis}
 The code evaluates the LISA constellation at the midpoint of each likelihood segment using the analytic MLDC orbit prescription. For \texttt{lisa\_config=orbiting}, the time dependence of the three spacecraft positions is retained; for \texttt{lisa\_config=stationary}, the geometry is frozen to the initial epoch. The anisotropic response is computed numerically by integrating over a HEALPix sky grid of resolution set by \texttt{nside}.
@@ -107,7 +125,7 @@ Y_{LM}(\hat{\Omega}),
 where $\Delta\Omega$ is the HEALPix pixel area and the sum over sky direction is the discrete approximation to the full sky integral. The resulting object is a complex Hermitian $3\times3$ covariance basis for each $(f_k,t_n)$ and each harmonic index $(L,M)$.
 
 \subsection{Full Spherical-Harmonic Anisotropy Model}
-In the full anisotropic mode, BLIP does not sample the power-map coefficients $a_{LM}$ directly. Instead it samples a set of coefficients $b_{\ell m}$ and converts them to $a_{LM}$ through Clebsch--Gordan couplings,
+In the full anisotropic mode, BLIP samples one overall spectral amplitude $\log_{10}\Omega_0$ together with a set of shape parameters $b_{\ell m}$. It does not sample the power-map coefficients $a_{LM}$ directly. Instead it converts the sampled $b_{\ell m}$ coefficients to $a_{LM}$ through Clebsch--Gordan couplings,
 \begin{equation}
 a_{LM}=\sum_{\ell_1 m_1}\sum_{\ell_2 m_2}
 \beta^{LM}_{\ell_1 m_1,\ell_2 m_2}\,
@@ -119,24 +137,25 @@ After constructing the $a_{LM}$, the code normalizes them according to
 \begin{equation}
 \tilde{a}_{LM}=\frac{a_{LM}}{a_{00}\sqrt{4\pi}},
 \end{equation}
-so that the monopole is fixed to the conventional normalization. The sky-convolved response is then
+so that the monopole is fixed to the conventional normalization. This normalization step is the key reason the meaning of the amplitude parameter can be confusing: after normalization, the $\tilde{a}_{LM}$ encode only the angular \emph{shape} of the sky, not its overall power scale. The overall SGWB normalization is carried entirely by $\Omega_0$, while the normalized coefficients redistribute that power over the sky. The sky-convolved response is then
 \begin{equation}
 R_{IJ}(f_k,t_n\mid \bm{b})
 =\sum_{LM} R_{IJ}^{LM}(f_k,t_n)\,\tilde{a}_{LM}.
 \end{equation}
 Finally, the anisotropic SGWB covariance becomes
 \begin{equation}
-C_{IJ}^{\mathrm{asgwb}}(f_k,t_n\mid \alpha,A,\bm{b})
-=S_{\mathrm{gw}}(f_k\mid \alpha,A)\,
+C_{IJ}^{\mathrm{asgwb}}(f_k,t_n\mid \alpha,\Omega_0,\bm{b})
+=S_{\mathrm{gw}}(f_k\mid \alpha,\Omega_0)\,
 R_{IJ}(f_k,t_n\mid \bm{b}).
 \end{equation}
+This is therefore different from a model that would sample independent amplitudes for the individual $a_{LM}$ modes. BLIP samples one global amplitude and a separate normalized anisotropy shape.
 
 \subsection{Single-Multipole Total-Power Model}
 The simplified anisotropy mode implemented for first-pass searches keeps one chosen multipole $L$ fixed and marginalizes over its $m$-modes analytically rather than sampling individual coefficients. In this mode the sampled parameters are just
 \begin{equation}
 \left\{\log_{10}N_p,\ \log_{10}N_a,\ \alpha,\ \log_{10}A_L\right\}.
 \end{equation}
-No sky map is reconstructed.
+No sky map is reconstructed. In particular, this mode does \emph{not} sample any $b_{\ell m}$ or $a_{LM}$ coefficients. The only spatial degree of freedom is the discrete choice of which multipole $L$ is being tested.
 
 The code first evaluates the spherical-harmonic response basis up to the selected multipole and then extracts the subset corresponding to that single $L$. It combines the $m$-mode responses into an effective covariance response through the Gram-matrix sum
 \begin{equation}
@@ -151,7 +170,7 @@ which is the matrix form of the operation implemented in the code. This produces
 =S_{\mathrm{gw}}(f_k\mid \alpha,A_L)\,
 \mathbf{R}_{\mathrm{eff}}^{(L)}(f_k,t_n).
 \end{equation}
-This mode is therefore especially useful for detectability studies or for establishing whether a given angular scale can be constrained before undertaking a full sky reconstruction.
+The quantity $A_L$ should therefore be read as ``the total power in the fixed multipole $L$ under the isotropic-in-$m$ averaging used by this reduced model,'' not as the same parameter as $\Omega_0$. It multiplies only the effective response for that chosen angular scale. When $L=0$, this construction reduces to the monopole member of the same fixed-$L$ family. This mode is therefore especially useful for detectability studies or for establishing whether a given angular scale can be constrained before undertaking a full sky reconstruction.
 
 \subsection{Priors}
 BLIP samples on the unit hypercube and applies deterministic prior transforms to map each cube coordinate $u\in[0,1]$ to a physical parameter:
@@ -171,7 +190,7 @@ Parameter & Meaning & Default interval & Example tuned interval \\
 $\log_{10}N_p$ & Position-noise level & $[-44,-39]$ & $[-43,-40]$ \\
 $\log_{10}N_a$ & Acceleration-noise level & $[-51,-46]$ & $[-50,-47]$ \\
 $\alpha$ & Power-law slope & $[-5,5]$ & $[-1,2.5]$ \\
-$\log_{10}\Omega_0$ & Isotropic SGWB amplitude & $[-14,8]$ & placeholder \\
+$\log_{10}\Omega_0$ & Overall SGWB amplitude in the isotropic and full-sph modes & $[-14,8]$ & placeholder \\
 $\log_{10}A_L$ & Fixed-$L$ total-power amplitude & $[-14,8]$ & $[-9.5,-5.5]$ \\
 $\alpha_1$ & Broken-power-law low-frequency slope & $[-4,6]$ & placeholder \\
 $\alpha_2$ & Broken-power-law high-frequency slope & $[0,40]$ & placeholder \\

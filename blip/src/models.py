@@ -556,8 +556,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             multipole_l = self.params.get('multipole_l', -1)
         
         multipole_l = int(multipole_l)
-        if multipole_l < 1:
-            raise ValueError("The single-multipole total-power mode requires 'multipole_l' >= 1 in the ini file.")
+        if multipole_l < 0:
+            raise ValueError("The single-multipole total-power mode requires 'multipole_l' >= 0 in the ini file.")
         
         return multipole_l
     
