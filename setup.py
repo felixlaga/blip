@@ -23,6 +23,7 @@ setup(
     scripts=["blip/run_blip"],
     install_requires=[
         "numpy",
+        "scipy",
         "matplotlib",
         "healpy==1.15.2",
         "chainconsumer",
@@ -40,5 +41,4 @@ setup(
     ],
     python_requires=">=3.10",
 )
-
 

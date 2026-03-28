@@ -32,6 +32,35 @@ class LISAdata():
             return os.path.abspath(input_spectrum)
         return os.path.join(self.params['out_dir'], input_spectrum)
 
+    def resolve_datafile_path(self):
+
+        '''
+        Resolve the configured external time-domain data file path.
+
+        Data files are interpreted relative to the current working directory
+        unless an absolute path is supplied.
+        '''
+
+        datafile = self.params['datafile']
+        if datafile is None:
+            return None
+        if os.path.isabs(datafile):
+            return datafile
+        return os.path.abspath(datafile)
+
+    def build_segment_times(self, nsegs):
+
+        '''
+        Reconstruct the segment start and midpoint arrays from the config.
+
+        Cached frequency-domain spectra do not store the original time array,
+        but BLIP only needs the per-segment timing for the detector response.
+        '''
+
+        tsegstart = self.params['tstart'] + self.params['seglen'] * np.arange(nsegs)
+        tsegmid = tsegstart + 0.5 * self.params['seglen']
+        return tsegstart, tsegmid
+
 
     ## Method for reading frequency domain spectral data if given in an npz file
     def read_spectrum(self):
@@ -141,7 +170,17 @@ class LISAdata():
 
         '''
 
-        hoft = np.loadtxt(self.params['datafile'])
+        datafile_path = self.resolve_datafile_path()
+        if datafile_path is None:
+            raise FileNotFoundError("No external datafile was configured.")
+        if not os.path.isfile(datafile_path):
+            raise FileNotFoundError(
+                "{} not found. Set [params] datafile to an existing ASCII time-domain file, "
+                "or set [run_params] input_spectrum to an existing cached .npz file with doPreProc=0."
+                .format(datafile_path)
+            )
+
+        hoft = np.loadtxt(datafile_path)
 
         fs_default = 1.0/(hoft[1, 0] - hoft[0, 0])
 
@@ -167,6 +206,22 @@ class LISAdata():
         primarily for the MLDC, this assumes that the data is doppler
         tracking and converts to strain data.
         '''
+
+        cached_spectrum = self.read_spectrum()
+        if cached_spectrum is not None:
+            self.r1, self.r2, self.r3, self.fdata = cached_spectrum
+            nsegs = self.r1.shape[1] if self.r1.ndim > 1 else 1
+            self.tsegstart, self.tsegmid = self.build_segment_times(nsegs)
+
+            # Characteristic frequency. Define f0.
+            cspeed = 3e8
+            fstar = cspeed/(2*np.pi*self.armlength)
+            self.f0 = self.fdata/(2*fstar)
+
+            # Cached spectra should already reflect the configured datatype/TDI
+            # choice from the preprocessing run, so no additional conversion is
+            # needed here.
+            return
 
         h1, h2, h3, self.timearray = self.read_data()
 
