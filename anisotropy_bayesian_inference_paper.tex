@@ -55,6 +55,209 @@ N_{\mathrm{seg}}=\left\lfloor \frac{T_{\mathrm{obs}}}{T_{\mathrm{seg}}}\right\rf
 \end{equation}
 and the segment loop advances by one full segment at a time. This is worth stating explicitly because comments in the source mention $50\%$ overlap, whereas the implemented FFT loop currently uses adjacent, non-overlapping likelihood segments.
 
+The implementation-level normalization is also explicit. Let
+\begin{equation}
+N_{\mathrm{per\,seg}} = f_s T_{\mathrm{seg}},
+\qquad
+w_j=\frac{1}{2}\left[1-\cos\!\left(\frac{2\pi j}{N_{\mathrm{per\,seg}}-1}\right)\right],
+\qquad
+j=0,\dots,N_{\mathrm{per\,seg}}-1,
+\end{equation}
+be the sample count per likelihood segment and the Hann window used by \texttt{np.hanning}. BLIP computes
+\begin{equation}
+\mathrm{win\_fact}=\frac{1}{N_{\mathrm{per\,seg}}}\sum_{j=0}^{N_{\mathrm{per\,seg}}-1} w_j^2,
+\end{equation}
+then evaluates
+\begin{equation}
+r_I(f_k,t_n)
+=\frac{\sqrt{2/\mathrm{win\_fact}}}{f_s\sqrt{T_{\mathrm{seg}}}}\,
+\mathrm{rFFT}\!\left[w_j h_I(j;t_n)\right]_k .
+\end{equation}
+The frequency bins before band selection are those of \texttt{np.fft.rfftfreq},
+\begin{equation}
+f_k=\frac{k}{T_{\mathrm{seg}}},
+\qquad
+k=0,\dots,\frac{N_{\mathrm{per\,seg}}}{2},
+\end{equation}
+and BLIP keeps only those satisfying $f_{\min}\le f_k\le f_{\max}$.
+
+\subsection{Literal Code Path from the \texttt{ini} File to the Log Likelihood}
+This subsection is intentionally more explicit than a standard methods section. Its purpose is to document the actual BLIP execution order, including bookkeeping choices that matter for reproducibility but are easy to miss if one reads only the higher-level equations.
+
+\paragraph{Step 1: parse configuration and rename logged injection parameters.}
+The driver script \texttt{blip/run\_blip} reads the \texttt{[params]}, \texttt{[inj]}, \texttt{[priors]}, and \texttt{[run\_params]} sections into two dictionaries called \texttt{params} and \texttt{inj}. For the anisotropy runs considered here, the most important entries are
+\begin{equation}
+\{f_{\min}, f_{\max}, T_{\mathrm{obs}}, T_{\mathrm{seg}}, f_s, f_{\mathrm{ref}},
+\texttt{tdi\_lev}, \texttt{lisa\_config}, \texttt{nside}, \ell_{\max}, L\}.
+\end{equation}
+If synthetic injections are enabled, the nested dictionary \texttt{inj['truevals']} is also rewritten so that any amplitude-like quantity supplied linearly in the \texttt{ini} file is stored internally in base-10 logarithmic form. In particular,
+\begin{equation}
+Np \mapsto \log_{10}Np,\quad
+Na \mapsto \log_{10}Na,\quad
+\Omega_0 \mapsto \log_{10}\Omega_0,\quad
+A_L \mapsto \log_{10}A_L,
+\end{equation}
+and similarly for the break and truncation frequencies when those spectral models are used. Parameters such as $\alpha$ are kept in linear form.
+
+\paragraph{Step 2: determine whether the run needs spherical-harmonic infrastructure.}
+BLIP sets an internal spherical-harmonic flag whenever either the analysis model or the injection model contains a spatial component named \texttt{sph}, \texttt{hierarchical}, or \texttt{multipole}. In the present anisotropy pipeline this means that the fixed-$L$ mode is treated as part of the anisotropy infrastructure even though it does not sample any free sky-map coefficients. If a spherical-harmonic-capable injection is needed and \texttt{inj\_lmax} is not given explicitly, the code sets
+\begin{equation}
+\ell_{\max}^{\mathrm{inj}}
+=\max\!\left(\ell_{\max}^{\mathrm{analysis}},L^{\mathrm{analysis}},L^{\mathrm{inj}}\right),
+\end{equation}
+so that the response basis is large enough for either the analysis or the injection.
+
+\paragraph{Step 3: construct the injection-side frequency and time grid.}
+For synthetic SGWB generation BLIP uses splice segments of fixed duration
+\begin{equation}
+T_{\mathrm{splice}}=10^4\ \mathrm{s}.
+\end{equation}
+The number of half-overlapping splice segments is
+\begin{equation}
+N_{\mathrm{splice}}
+=2\left\lfloor\frac{T_{\mathrm{obs}}}{T_{\mathrm{splice}}}\right\rfloor+1,
+\end{equation}
+the midpoint of splice $n$ is
+\begin{equation}
+t_n^{\mathrm{splice}}
+=t_{\mathrm{start}}+\frac{T_{\mathrm{splice}}}{2}(n+1),
+\qquad
+n=0,\dots,N_{\mathrm{splice}}-1,
+\end{equation}
+and the splice FFT size is
+\begin{equation}
+N_{\mathrm{per\,splice}}=f_s T_{\mathrm{splice}}.
+\end{equation}
+BLIP then defines the injection frequency grid as
+\begin{equation}
+f_k^{\mathrm{splice}}=\frac{k}{T_{\mathrm{splice}}},
+\qquad
+k=1,\dots,\frac{N_{\mathrm{per\,splice}}}{2},
+\end{equation}
+where the $k=0$ bin is deliberately dropped at this stage. The scaled LISA frequency variable used everywhere downstream is
+\begin{equation}
+f_{0,k}^{\mathrm{splice}}=\frac{f_k^{\mathrm{splice}}}{2f_\star}.
+\end{equation}
+
+\paragraph{Step 4: build the injection components and their response objects.}
+The \texttt{Injection} object instantiates one \texttt{submodel} per component in the injection string. For anisotropic components this is the stage where BLIP computes either
+\begin{equation}
+\texttt{response\_mat}\in\mathbb{C}^{3\times 3\times N_f\times N_t\times N_{\mathrm{alm}}}
+\end{equation}
+for the full spherical-harmonic basis, or
+\begin{equation}
+\texttt{response\_mat}\in\mathbb{C}^{3\times 3\times N_f\times N_t}
+\end{equation}
+for isotropic and fixed-$L$ runs after the relevant angular combination has already been performed. In the full spherical-harmonic injection mode the code also computes the injected normalized sky harmonics and immediately contracts them with the response basis to form
+\begin{equation}
+\texttt{inj\_response\_mat}
+=\sum_{LM}\mathbf{R}^{LM}\tilde{a}_{LM}.
+\end{equation}
+
+\paragraph{Step 5: generate instrumental noise and SGWB time series.}
+The detector-noise component is produced first using the dedicated routines in \texttt{instrNoise.py}. Each SGWB component is then added by calling \texttt{add\_sgwb\_data}. For a given SGWB component with response $\mathbf{R}$ and spectral density $S_{\mathrm{gw}}$, the code computes
+\begin{equation}
+\mathrm{norm}_k=\frac{1}{2}\sqrt{f_s\,S_{\mathrm{gw}}(f_k^{\mathrm{splice}})\,N_{\mathrm{per\,splice}}}.
+\end{equation}
+At each splice midpoint $t_n^{\mathrm{splice}}$, BLIP forms the Cholesky factor
+\begin{equation}
+\mathbf{L}(f_k,t_n)
+=\mathrm{norm}_k\,\mathrm{chol}\!\left[\mathbf{R}(f_k,t_n)\right],
+\end{equation}
+draws an independent complex Gaussian vector
+\begin{equation}
+\mathbf{z}(f_k,t_n)\sim
+\mathcal{N}(0,1)^3+i\,\mathcal{N}(0,1)^3,
+\end{equation}
+and rescales it as
+\begin{equation}
+\tilde{\mathbf{h}}(f_k,t_n)=\mathbf{L}(f_k,t_n)\mathbf{z}(f_k,t_n).
+\end{equation}
+For each channel, the code prepends a zero-valued DC bin, inverse transforms with \texttt{np.fft.irfft}, multiplies by the sine splice window
+\begin{equation}
+w_j^{\mathrm{splice}}=\sin\!\left(\frac{\pi j}{N_{\mathrm{per\,splice}}}\right),
+\qquad
+j=0,\dots,N_{\mathrm{per\,splice}}-1,
+\end{equation}
+and overlap-adds successive splice realizations with a half-splice offset. After all splice segments have been added, the first and last half splice are removed. This is the SGWB injection procedure actually used in the code.
+
+\paragraph{Step 6: convert the full time series to analysis Fourier coefficients.}
+Once all time-domain components have been added together, BLIP calls \texttt{tser2fser}. The number of analysis segments is again
+\begin{equation}
+N_{\mathrm{seg}}=\left\lfloor \frac{T_{\mathrm{obs}}}{T_{\mathrm{seg}}}\right\rfloor-1,
+\end{equation}
+but now the segment boundaries are set by
+\begin{equation}
+j_{\min}(n)=n\,N_{\mathrm{per\,seg}},
+\qquad
+j_{\max}(n)=j_{\min}(n)+N_{\mathrm{per\,seg}}.
+\end{equation}
+Therefore the implemented likelihood segments are adjacent rather than $50\%$ overlapped. The segment midpoint used later in the response evaluation is the midpoint sample of each of those non-overlapping data blocks.
+
+\paragraph{Step 7: build the data correlation matrix.}
+BLIP stacks the three complex Fourier coefficients into
+\begin{equation}
+\bar{\mathbf{r}}(f_k,t_n)=
+\begin{bmatrix}
+r_1(f_k,t_n)\\
+r_2(f_k,t_n)\\
+r_3(f_k,t_n)
+\end{bmatrix},
+\end{equation}
+then stores the data correlation matrix as the outer product
+\begin{equation}
+\mathbf{D}(f_k,t_n)
+=\bar{\mathbf{r}}^\ast(f_k,t_n)\otimes \bar{\mathbf{r}}(f_k,t_n),
+\qquad
+D_{IJ}(f_k,t_n)=r_I^\ast(f_k,t_n)r_J(f_k,t_n).
+\end{equation}
+This object is stored in memory as \texttt{rmat[f, t, i, j]}.
+
+\paragraph{Step 8: build the analysis model and evaluate the prior transform.}
+The \texttt{Model} object parses the analysis model string, creates one \texttt{submodel} per component, concatenates all of their parameter lists, and defines a single prior transform on the unit hypercube. For the standard fixed-$L$ model
+\begin{equation}
+\texttt{model=noise+powerlaw\_multipole},
+\end{equation}
+the transformed parameter vector is ordered as
+\begin{equation}
+\bm{\theta}=
+\left\{
+\log_{10}N_p,\,
+\log_{10}N_a,\,
+\alpha,\,
+\log_{10}A_L
+\right\}.
+\end{equation}
+For the full spherical-harmonic model the same noise and spectral parameters come first, followed by the ordered list of $b_{\ell m}$-derived real parameters described below.
+
+\paragraph{Step 9: evaluate each submodel covariance and sum them.}
+Each submodel receives its own parameter slice and returns a covariance contribution of shape
+\begin{equation}
+\mathbf{C}_a\in\mathbb{C}^{3\times 3\times N_f\times N_t}.
+\end{equation}
+The unified model simply adds them,
+\begin{equation}
+\mathbf{C}_{\mathrm{tot}}
+=\sum_a \mathbf{C}_a.
+\end{equation}
+Only after this sum is formed does BLIP move the frequency and time axes to the front so that the covariance array has shape
+\begin{equation}
+(N_f,N_t,3,3),
+\end{equation}
+which is the layout expected by the custom inverse routine.
+
+\paragraph{Step 10: compute the inverse, determinant, and log likelihood.}
+BLIP applies a vectorized $3\times 3$ inverse called \texttt{bespoke\_inv} to every $(f_k,t_n)$ covariance. The resulting inverse and determinant are contracted with the stored data correlation matrix to produce
+\begin{equation}
+\ln \mathcal{L}
+=-\sum_{k,n,I,J}
+\left[\mathbf{C}^{-1}(f_k,t_n)\right]_{IJ}
+D_{IJ}(f_k,t_n)
+-\sum_{k,n}\ln\!\left[\pi T_{\mathrm{seg}}\,
+\left|\det \mathbf{C}(f_k,t_n)\right|\right].
+\end{equation}
+The code returns the real part of that expression. In other words, every posterior sample in BLIP is scored by explicitly rebuilding the full $3\times 3$ channel covariance for all retained frequencies and times, not by a compressed statistic.
+
 \subsection{Instrumental Noise Model}
 BLIP models the fundamental LISA noise budget using one position-noise scale $N_p$ and one acceleration-noise scale $N_a$. The corresponding one-link spectra are
 \begin{align}
@@ -69,6 +272,30 @@ S_{\mathrm{auto}}(f) &= 4\left[2S_a(f)\left(1+\cos^2 2f_0\right)+S_p(f)\right], 
 S_{\mathrm{cross}}(f) &= \left[-2S_p(f)-8S_a(f)\right]\cos(2f_0),
 \end{align}
 from which the full $3\times3$ Michelson covariance matrix is built. The \texttt{xyz} noise model is obtained by multiplying the Michelson response by $4\sin^2(2f_0)$, and the \texttt{aet} covariance is then formed by the standard linear combinations of the $X,Y,Z$ channels.
+
+More explicitly, the Michelson covariance used by the code is
+\begin{equation}
+\mathbf{C}_{\mathrm{mich}}(f)=
+\begin{bmatrix}
+S_{\mathrm{auto}} & S_{\mathrm{cross}} & S_{\mathrm{cross}} \\
+S_{\mathrm{cross}} & S_{\mathrm{auto}} & S_{\mathrm{cross}} \\
+S_{\mathrm{cross}} & S_{\mathrm{cross}} & S_{\mathrm{auto}}
+\end{bmatrix},
+\end{equation}
+the XYZ covariance is
+\begin{equation}
+\mathbf{C}_{XYZ}(f)=4\sin^2(2f_0)\,\mathbf{C}_{\mathrm{mich}}(f),
+\end{equation}
+and the AET elements are coded as
+\begin{align}
+C_{AA} &= \frac{1}{9}\left(4C_{XX}+C_{YY}+C_{ZZ}-2C_{XY}-2C_{XY}^{\ast}-2C_{XZ}-2C_{XZ}^{\ast}+C_{YZ}+C_{YZ}^{\ast}\right), \\
+C_{EE} &= \frac{1}{3}\left(C_{ZZ}+C_{YY}-C_{YZ}-C_{YZ}^{\ast}\right), \\
+C_{TT} &= \frac{1}{9}\left(C_{XX}+C_{YY}+C_{ZZ}+C_{XY}+C_{XY}^{\ast}+C_{XZ}+C_{XZ}^{\ast}+C_{YZ}+C_{YZ}^{\ast}\right), \\
+C_{AE} &= \frac{1}{3\sqrt{3}}\left(C_{YY}-C_{ZZ}-C_{YZ}+C_{YZ}^{\ast}+2C_{XZ}-2C_{XY}\right), \\
+C_{AT} &= \frac{1}{9}\left(2C_{XX}-C_{YY}-C_{ZZ}+2C_{XY}-C_{XY}^{\ast}+2C_{XZ}-C_{XZ}^{\ast}-C_{YZ}-C_{YZ}^{\ast}\right), \\
+C_{ET} &= \frac{1}{3\sqrt{3}}\left(C_{ZZ}-C_{YY}-C_{YZ}+C_{YZ}^{\ast}+C_{XZ}^{\ast}-C_{XY}^{\ast}\right).
+\end{align}
+The response code uses exactly the same XYZ$\rightarrow$AET algebra when transforming the SGWB covariance and response basis, so noise and signal live in the same channel basis by construction.
 
 In terms of sampled parameters, BLIP works with $\log_{10}N_p$ and $\log_{10}N_a$. For any proposed point in parameter space, the instrumental covariance contribution is
 \begin{equation}
@@ -113,6 +340,85 @@ The important distinction is that $\Omega_0$ is an overall spectral normalizatio
 \subsection{LISA Orbital Response and Anisotropy Basis}
 The code evaluates the LISA constellation at the midpoint of each likelihood segment using the analytic MLDC orbit prescription. For \texttt{lisa\_config=orbiting}, the time dependence of the three spacecraft positions is retained; for \texttt{lisa\_config=stationary}, the geometry is frozen to the initial epoch. The anisotropic response is computed numerically by integrating over a HEALPix sky grid of resolution set by \texttt{nside}.
 
+The orbit model used by the implementation is
+\begin{align}
+\alpha(t) &= \frac{2\pi}{31557600}\,t + \alpha_{\mathrm{phase}}, \\
+\beta_n &= \frac{2\pi}{3}n + \beta_{\mathrm{phase}}, \qquad n\in\{0,1,2\}, \\
+e &= \frac{L_{\mathrm{arm}}}{2a\sqrt{3}},
+\end{align}
+with semimajor axis $a=1.496\times10^{11}\ \mathrm{m}$ and default phases $\alpha_{\mathrm{phase}}=\beta_{\mathrm{phase}}=0$. The three spacecraft positions are then
+\begin{align}
+x_n &= a\cos\alpha + ae\left(\sin\alpha\cos\alpha\sin\beta_n-(1+\sin^2\alpha)\cos\beta_n\right), \\
+y_n &= a\sin\alpha + ae\left(\sin\alpha\cos\alpha\cos\beta_n-(1+\cos^2\alpha)\sin\beta_n\right), \\
+z_n &= -\sqrt{3}\,ae\cos(\alpha-\beta_n).
+\end{align}
+For \texttt{lisa\_config=stationary}, BLIP evaluates these expressions only at the initial epoch and repeats the resulting geometry at every time segment.
+
+On the sky, BLIP uses a HEALPix grid with
+\begin{equation}
+N_{\mathrm{pix}}=12\,\texttt{nside}^2,
+\qquad
+\Delta\Omega=\frac{4\pi}{N_{\mathrm{pix}}}.
+\end{equation}
+For each pixel $p$ it computes
+\begin{equation}
+(\theta_p,\phi_p)=\texttt{hp.pix2ang}(\texttt{nside},p),
+\qquad
+\hat{\Omega}_p=
+(\sin\theta_p\cos\phi_p,\sin\theta_p\sin\phi_p,\cos\theta_p).
+\end{equation}
+The arm-direction dot products used everywhere later are
+\begin{equation}
+u_p(t_n)=\hat{u}(t_n)\cdot\hat{\Omega}_p,
+\qquad
+v_p(t_n)=\hat{v}(t_n)\cdot\hat{\Omega}_p,
+\qquad
+w_p(t_n)=\hat{w}(t_n)\cdot\hat{\Omega}_p,
+\end{equation}
+where
+\begin{equation}
+\hat{u}=\frac{\mathbf{r}_2-\mathbf{r}_1}{|\mathbf{r}_2-\mathbf{r}_1|},
+\qquad
+\hat{v}=\frac{\mathbf{r}_3-\mathbf{r}_1}{|\mathbf{r}_3-\mathbf{r}_1|},
+\qquad
+\hat{w}=\frac{\mathbf{r}_3-\mathbf{r}_2}{|\mathbf{r}_3-\mathbf{r}_2|}.
+\end{equation}
+
+The code also builds the sky-basis vectors
+\begin{equation}
+\hat{m}_p=(\sin\phi_p,-\cos\phi_p,0),
+\qquad
+\hat{n}_p=(\cos\phi_p\cos\theta_p,\sin\phi_p\cos\theta_p,-\sin\theta_p).
+\end{equation}
+Using these, it forms the arm-tensor contractions
+\begin{align}
+F^{+}_{u}(t_n,p) &= \frac{1}{2}\left(\hat{u}\otimes\hat{u}\right):\left(\hat{m}\otimes\hat{m}-\hat{n}\otimes\hat{n}\right), \\
+F^{+}_{v}(t_n,p) &= \frac{1}{2}\left(\hat{v}\otimes\hat{v}\right):\left(\hat{m}\otimes\hat{m}-\hat{n}\otimes\hat{n}\right), \\
+F^{+}_{w}(t_n,p) &= \frac{1}{2}\left(\hat{w}\otimes\hat{w}\right):\left(\hat{m}\otimes\hat{m}-\hat{n}\otimes\hat{n}\right).
+\end{align}
+The arrays named \texttt{Fcross\_u}, \texttt{Fcross\_v}, and \texttt{Fcross\_w} in the implementation are built literally as
+\begin{align}
+F^{\times,\mathrm{code}}_{u}(t_n,p) &= \frac{1}{2}\left(\hat{u}\otimes\hat{u}\right):\left(\hat{m}\otimes\hat{m}+\hat{n}\otimes\hat{n}\right), \\
+F^{\times,\mathrm{code}}_{v}(t_n,p) &= \frac{1}{2}\left(\hat{v}\otimes\hat{v}\right):\left(\hat{m}\otimes\hat{m}+\hat{n}\otimes\hat{n}\right), \\
+F^{\times,\mathrm{code}}_{w}(t_n,p) &= \frac{1}{2}\left(\hat{w}\otimes\hat{w}\right):\left(\hat{m}\otimes\hat{m}+\hat{n}\otimes\hat{n}\right),
+\end{align}
+so these equations reproduce the code literally rather than replacing them with a more idealized textbook notation.
+
+For each scaled frequency $f_{0,k}$, BLIP then evaluates the transfer functions
+\begin{align}
+\gamma^{+}_{U}(k,n,p)
+&=\frac{1}{2}\left[
+\mathrm{sinc}\!\left(\frac{f_{0,k}(1-u_p)}{\pi}\right)e^{-if_{0,k}(3+u_p)}
++\mathrm{sinc}\!\left(\frac{f_{0,k}(1+u_p)}{\pi}\right)e^{-if_{0,k}(1+u_p)}
+\right], \\
+\gamma^{-}_{U}(k,n,p)
+&=\frac{1}{2}\left[
+\mathrm{sinc}\!\left(\frac{f_{0,k}(1+u_p)}{\pi}\right)e^{-if_{0,k}(3-u_p)}
++\mathrm{sinc}\!\left(\frac{f_{0,k}(1-u_p)}{\pi}\right)e^{-if_{0,k}(1-u_p)}
+\right],
+\end{align}
+and analogously for the $V$ and $W$ arms by replacing $u_p$ with $v_p$ or $w_p$.
+
 For each sky direction $\hat{\Omega}$, each time segment $t_n$, and each frequency bin $f_k$, BLIP evaluates the polarization-summed products of the LISA antenna pattern functions. The spherical-harmonic response basis is then constructed as
 \begin{equation}
 R_{IJ}^{LM}(f_k,t_n)
@@ -123,6 +429,40 @@ F_J^{p\ast}(\hat{\Omega},f_k,t_n)\,
 Y_{LM}(\hat{\Omega}),
 \end{equation}
 where $\Delta\Omega$ is the HEALPix pixel area and the sum over sky direction is the discrete approximation to the full sky integral. The resulting object is a complex Hermitian $3\times3$ covariance basis for each $(f_k,t_n)$ and each harmonic index $(L,M)$.
+
+The Michelson-channel combinations used inside that expression are, in the exact notation of the code,
+\begin{align}
+F^{+}_{1} &= \frac{1}{2}\left(F^{+}_{u}\gamma^{+}_{U}-F^{+}_{v}\gamma^{+}_{V}\right)
+e^{-if_0(u+v)/\sqrt{3}}, \\
+F^{+}_{2} &= \frac{1}{2}\left(F^{+}_{w}\gamma^{+}_{W}-F^{+}_{u}\gamma^{-}_{U}\right)
+e^{-if_0(-u+v)/\sqrt{3}}, \\
+F^{+}_{3} &= \frac{1}{2}\left(F^{+}_{v}\gamma^{-}_{V}-F^{+}_{w}\gamma^{-}_{W}\right)
+e^{+if_0(v+w)/\sqrt{3}},
+\end{align}
+with exactly analogous expressions for the \texttt{Fcross} arrays. The polarization-summed products are then
+\begin{align}
+\mathcal{F}_{11} &= |F^{+}_{1}|^2 + |F^{\times,\mathrm{code}}_{1}|^2, \\
+\mathcal{F}_{22} &= |F^{+}_{2}|^2 + |F^{\times,\mathrm{code}}_{2}|^2, \\
+\mathcal{F}_{33} &= |F^{+}_{3}|^2 + |F^{\times,\mathrm{code}}_{3}|^2, \\
+\mathcal{F}_{12} &= (F^{+}_{1})^\ast F^{+}_{2} + (F^{\times,\mathrm{code}}_{1})^\ast F^{\times,\mathrm{code}}_{2},
+\end{align}
+and similarly for $(13)$ and $(23)$. In the isotropic case the code integrates these with prefactor $\Delta\Omega/(8\pi)$ and no spherical harmonics,
+\begin{equation}
+R^{\mathrm{iso}}_{IJ}(f_k,t_n)
+=\frac{\Delta\Omega}{8\pi}\sum_p \mathcal{F}_{IJ}(f_k,t_n,p),
+\end{equation}
+whereas in the anisotropic basis case it stores
+\begin{equation}
+R^{LM}_{IJ}(f_k,t_n)
+=\frac{\Delta\Omega}{2}\sum_p \mathcal{F}_{IJ}(f_k,t_n,p)\,Y_{LM}(\theta_p,\phi_p).
+\end{equation}
+This difference in prefactor is consistent with the later normalization $\tilde{a}_{00}=1/\sqrt{4\pi}$ of the anisotropic sky.
+
+Finally, the code converts Michelson responses to XYZ responses by
+\begin{equation}
+\mathbf{R}_{XYZ}=4\sin^2(2f_0)\,\mathbf{R}_{\mathrm{mich}},
+\end{equation}
+and then applies exactly the same XYZ$\rightarrow$AET linear transformation written earlier for the instrumental noise covariance.
 
 \subsection{Full Spherical-Harmonic Anisotropy Model}
 In the full anisotropic mode, BLIP samples one overall spectral amplitude $\log_{10}\Omega_0$ together with a set of shape parameters $b_{\ell m}$. It does not sample the power-map coefficients $a_{LM}$ directly. Instead it converts the sampled $b_{\ell m}$ coefficients to $a_{LM}$ through Clebsch--Gordan couplings,
@@ -150,6 +490,61 @@ R_{IJ}(f_k,t_n\mid \bm{b}).
 \end{equation}
 This is therefore different from a model that would sample independent amplitudes for the individual $a_{LM}$ modes. BLIP samples one global amplitude and a separate normalized anisotropy shape.
 
+The code-level parameterization is worth spelling out. The coefficient $b_{00}$ is fixed to unity and is never sampled. The sampled real parameter list is generated in the nested loop
+\begin{equation}
+\ell=1,\dots,\ell_{\max},
+\qquad
+m=0,\dots,\ell,
+\end{equation}
+with one real parameter for each $m=0$ mode and two real parameters (amplitude and phase) for each $m>0$ mode. Thus the number of anisotropy-shape parameters is
+\begin{equation}
+N_{b\text{-params}}
+=\sum_{\ell=1}^{\ell_{\max}} (2\ell+1)
+=\ell_{\max}(\ell_{\max}+2).
+\end{equation}
+For example, at $\ell_{\max}=2$ the ordered parameter list is
+\begin{equation}
+\left\{
+b_{10},\,|b_{11}|,\,\phi_{11},\,b_{20},\,|b_{21}|,\,\phi_{21},\,|b_{22}|,\,\phi_{22}
+\right\}.
+\end{equation}
+
+Internally, BLIP first reconstructs the complex $b_{\ell m}$ array for non-negative $m$ as
+\begin{equation}
+b_{\ell 0}=b_{\ell 0}^{\mathrm{(sampled)}},
+\qquad
+b_{\ell m}=|b_{\ell m}|\,e^{i\phi_{\ell m}}
+\quad (m>0),
+\end{equation}
+then extends it to negative $m$ using the spherical-harmonic reality relation
+\begin{equation}
+b_{\ell,-m}=(-1)^m b_{\ell m}^{\ast}.
+\end{equation}
+The Clebsch--Gordan coupling coefficients precomputed in \texttt{clebschGordan.py} are
+\begin{equation}
+\beta^{LM}_{\ell_1 m_1,\ell_2 m_2}
+=\sqrt{\frac{(2\ell_1+1)(2\ell_2+1)}{4\pi(2L+1)}}
+\,
+\langle \ell_1 0,\ell_2 0 \mid L0\rangle
+\,
+\langle \ell_1 m_1,\ell_2 m_2 \mid LM\rangle,
+\end{equation}
+and the code applies them as the tensor contraction
+\begin{equation}
+a_{LM}
+=\sum_{\ell_1 m_1}\sum_{\ell_2 m_2}
+\beta^{LM}_{\ell_1 m_1,\ell_2 m_2}
+b_{\ell_1 m_1}b_{\ell_2 m_2}
+=\texttt{np.einsum('ijk,j,k', beta\_vals, blm\_full, blm\_full)}.
+\end{equation}
+The sky-convolved response is likewise evaluated by a literal tensor contraction,
+\begin{equation}
+\mathbf{R}(f_k,t_n\mid\bm{b})
+=\sum_{LM}\mathbf{R}^{LM}(f_k,t_n)\tilde{a}_{LM}
+=\texttt{np.einsum('ijklm,m', response\_mat, alms)}.
+\end{equation}
+That is the full anisotropic forward model actually used inside each likelihood call.
+
 \subsection{Single-Multipole Total-Power Model}
 The simplified anisotropy mode implemented for first-pass searches keeps one chosen multipole $L$ fixed and marginalizes over its $m$-modes analytically rather than sampling individual coefficients. In this mode the sampled parameters are just
 \begin{equation}
@@ -171,6 +566,38 @@ which is the matrix form of the operation implemented in the code. This produces
 \mathbf{R}_{\mathrm{eff}}^{(L)}(f_k,t_n).
 \end{equation}
 The quantity $A_L$ should therefore be read as ``the total power in the fixed multipole $L$ under the isotropic-in-$m$ averaging used by this reduced model,'' not as the same parameter as $\Omega_0$. It multiplies only the effective response for that chosen angular scale. When $L=0$, this construction reduces to the monopole member of the same fixed-$L$ family. This mode is therefore especially useful for detectability studies or for establishing whether a given angular scale can be constrained before undertaking a full sky reconstruction.
+
+The implementation is deliberately simple and it is useful to state exactly how simple. BLIP does \emph{not} create a new covariance routine for the fixed-$L$ model. Instead it
+\begin{enumerate}
+\item sets \texttt{set\_almax=L} when computing the anisotropic response basis;
+\item extracts only those harmonic-basis indices whose custom \texttt{idxtoalm(L, ii)} mapping has angular degree $\ell=L$;
+\item forms one effective response matrix from those $2L+1$ basis elements;
+\item reuses the isotropic covariance routine \texttt{compute\_cov\_isgwb}, which simply multiplies the scalar spectrum by the precomputed \texttt{response\_mat}.
+\end{enumerate}
+In other words, the reduced model is implemented by replacing the usual isotropic response matrix with a preprocessed fixed-$L$ effective response matrix.
+
+The effective response computed by \texttt{compute\_single\_multipole\_response} is, component by component,
+\begin{equation}
+\left[R_{\mathrm{eff}}^{(L)}\right]_{ij}(f_k,t_n)
+=\frac{1}{2L+1}
+\sum_{m=-L}^{L}\sum_{q=1}^{3}
+R_{iq}^{(Lm)}(f_k,t_n)\,
+R_{jq}^{(Lm)\ast}(f_k,t_n),
+\end{equation}
+which is exactly the Einstein-summation pattern
+\begin{equation}
+\texttt{np.einsum('ikftm,jkftm->ijft', multipole\_response, conj(multipole\_response))}.
+\end{equation}
+After this contraction BLIP explicitly Hermitian-symmetrizes the matrix,
+\begin{equation}
+\mathbf{R}_{\mathrm{eff}}^{(L)}
+\leftarrow
+\frac{1}{2}\left(
+\mathbf{R}_{\mathrm{eff}}^{(L)}
++\mathbf{R}_{\mathrm{eff}}^{(L)\dagger}
+\right),
+\end{equation}
+so that numerical roundoff cannot spoil Hermiticity before the likelihood is evaluated.
 
 \subsection{Priors}
 BLIP samples on the unit hypercube and applies deterministic prior transforms to map each cube coordinate $u\in[0,1]$ to a physical parameter:
@@ -215,6 +642,12 @@ b_{\ell m}=|b_{\ell m}|\,e^{i\phi_{\ell m}}.
 \end{equation}
 These priors encode a broad but finite anisotropy space without imposing a preferred phase orientation.
 
+The prior code itself is modular. The \texttt{noise} submodel uses \texttt{instr\_noise\_prior}; the isotropic and fixed-$L$ SGWB models both use \texttt{isotropic\_prior}, which is only a thin wrapper around the chosen spectral prior; and the full anisotropic model uses \texttt{sph\_prior}, which applies the spectral prior first and then appends the $b_{\ell m}$ transform in the order generated by \texttt{gen\_blm\_parameters}. For the fixed-$L$ mode, the plotted amplitude label is not generic $\log_{10}A_L$ but the run-specific string
+\begin{equation}
+\log_{10}(A_{L_{\mathrm{selected}}}),
+\end{equation}
+for example $\log_{10}(A_2)$ when \texttt{multipole\_l = 2}. This is purely a labeling choice; the prior interval is still read from the \texttt{log\_A\_L} entry in the configuration file.
+
 \subsection{Covariance Likelihood}
 For any proposed parameter vector $\bm{\theta}$, BLIP computes the total covariance as the sum of the contributions from each active submodel,
 \begin{equation}
@@ -238,6 +671,27 @@ The likelihood is the complex Gaussian likelihood for the Fourier-domain TDI dat
 \end{equation}
 This is exactly the structure implemented in BLIP. The matrix inverse and determinant are computed with a custom vectorized $3\times3$ routine rather than repeated generic linear-algebra calls, which improves performance because every likelihood evaluation requires inverses across all frequencies and time segments.
 
+The custom inverse is itself simple enough to write down. For each $3\times 3$ matrix $\mathbf{A}$, \texttt{bespoke\_inv} constructs the cofactor rows via cyclic cross products,
+\begin{equation}
+\mathbf{AI}_{i:}=\mathbf{A}_{i-2,:}\times \mathbf{A}_{i-1,:},
+\qquad
+i=0,1,2,
+\end{equation}
+computes the determinant as the average of the repeated scalar triple products,
+\begin{equation}
+\det \mathbf{A}
+=\frac{1}{3}\sum_{i=0}^{2} \mathbf{AI}_{i:}\cdot \mathbf{A}_{i:},
+\end{equation}
+and returns
+\begin{equation}
+\mathbf{A}^{-1}=\left(\frac{\mathbf{AI}}{\det \mathbf{A}}\right)^{T}.
+\end{equation}
+Because BLIP stores one covariance matrix per frequency and time, this vectorized inverse is applied to the full stack
+\begin{equation}
+\left\{\mathbf{C}(f_k,t_n)\right\}_{k=1,\dots,N_f;\,n=1,\dots,N_t}
+\end{equation}
+in one call.
+
 \subsection{Injection Generation}
 When synthetic data are generated, the SGWB contribution is produced directly from the model covariance. For each splice segment the code performs a Cholesky decomposition of the channel covariance,
 \begin{equation}
@@ -248,6 +702,18 @@ draws complex standard-normal random vectors $\bm{z}$, and rescales them as
 \tilde{\bm{h}}(f_k,t_n)=\mathbf{L}(f_k,t_n)\bm{z}.
 \end{equation}
 The resulting frequency-domain realization is inverse-Fourier transformed into time-domain splices, multiplied by a sine splice window, and overlap-added. In the current implementation the SGWB injection uses half-overlapping splices of fixed duration $10^4\ \mathrm{s}$. This injection-side overlap is separate from the likelihood-side Fourier segmentation described above.
+
+Written out in the exact order of operations, one SGWB injection splice is generated as follows:
+\begin{align}
+S_{\mathrm{gw},k} &\leftarrow \texttt{compute\_Sgw}(f_k^{\mathrm{splice}},\text{true spectral parameters}), \\
+\mathrm{norm}_k &\leftarrow \frac{1}{2}\sqrt{f_s S_{\mathrm{gw},k} N_{\mathrm{per\,splice}}}, \\
+\mathbf{L}_{k,n} &\leftarrow \mathrm{norm}_k\,\mathrm{chol}\!\left[\mathbf{R}_{k,n}^{\mathrm{inj}}\right], \\
+\mathbf{z}_{k,n} &\leftarrow \mathcal{N}(0,1)^3+i\,\mathcal{N}(0,1)^3, \\
+\tilde{\mathbf{h}}_{k,n} &\leftarrow \mathbf{L}_{k,n}\mathbf{z}_{k,n}, \\
+h_I^{(n)}(j) &\leftarrow \sin\!\left(\frac{\pi j}{N_{\mathrm{per\,splice}}}\right)\,
+\mathrm{irFFT}\!\left([0,\tilde{h}_{I,1,n},\dots,\tilde{h}_{I,N_f,n}]\right)_j .
+\end{align}
+The overlap-add step then appends a half splice of zeros and adds the new splice onto the final $N_{\mathrm{per\,splice}}$ samples of the running time series. This detail matters: BLIP does not generate one stationary time series from one giant FFT; it constructs the SGWB as a sequence of locally stationary splice realizations whose covariance is allowed to vary from one splice midpoint to the next through the time-dependent detector response.
 
 \subsection{Samplers and Evidence Calculation}
 BLIP currently supports three posterior engines.
@@ -277,31 +743,37 @@ These files provide the numerical values and figures that should replace the exp
 
 \section{Results}
 \subsection{Analysis Setup}
-This subsection should summarize the exact configuration used for the production analysis.
+This subsection summarizes one representative fixed-$L$ production-style configuration shipped with the repository, namely the setup in \texttt{params\_single\_multipole\_paper.ini}. If a different run is used for the final paper, the entries below should be updated to match that exact configuration.
 
 \begin{table}[H]
 \centering
-\caption{Placeholder table for the final run configuration. Replace the entries below with the values used in the production analysis.}
+\caption{Representative run configuration for the fixed-$L$ paper example bundled with BLIP.}
 \label{tab:runconfig}
 \begin{tabular}{lll}
 \toprule
 Quantity & Symbol / setting & Value used in final run \\
 \midrule
-Observation duration & $T_{\mathrm{obs}}$ & placeholder \\
-Segment length & $T_{\mathrm{seg}}$ & placeholder \\
-Frequency band & $[f_{\min},f_{\max}]$ & placeholder \\
-TDI basis & channels & placeholder \\
-Sky resolution & \texttt{nside} & placeholder \\
-Anisotropy model & full sph or fixed $L$ & placeholder \\
-Multipole choice & $L$ (if applicable) & placeholder \\
-Sampler & dynesty / nessai / emcee & placeholder \\
-Sampler setting & $n_{\mathrm{live}}$ or walkers & placeholder \\
-Seed & random seed & placeholder \\
+Observation duration & $T_{\mathrm{obs}}$ & $2\times10^6\ \mathrm{s}$ \\
+Segment length & $T_{\mathrm{seg}}$ & $10^5\ \mathrm{s}$ \\
+Frequency band & $[f_{\min},f_{\max}]$ & $[4\times10^{-4},\,3\times10^{-3}]\,\mathrm{Hz}$ \\
+TDI basis & channels & AET \\
+Sky resolution & \texttt{nside} & 4 \\
+Anisotropy model & full sph or fixed $L$ & fixed-$L$ total-power mode \\
+Multipole choice & $L$ (if applicable) & 2 \\
+Sampler & dynesty / nessai / emcee & dynesty \\
+Sampler setting & $n_{\mathrm{live}}$ or walkers & $n_{\mathrm{live}}=1000$, \texttt{sample\_method=rslice} \\
+Seed & random seed & 42 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Placeholder text: describe whether the run was an injection-recovery study or an analysis of externally supplied data, identify the spectral model, state the prior ranges actually used, and mention whether the analysis was carried out in the full spherical-harmonic mode or in the single-multipole total-power mode.
+In that representative run, BLIP performs an injection-recovery study rather than reading external data, uses the model \texttt{noise+powerlaw\_multipole}, sets \texttt{multipole\_l = 2} in both the analysis and injection blocks, injects $(N_p, N_a, \alpha, A_2)=(9\times10^{-42},\,3.6\times10^{-49},\,0.667,\,2\times10^{-7})$, and adopts the tuned prior ranges
+\begin{equation}
+\log_{10}N_p\in[-43,-40],\quad
+\log_{10}N_a\in[-50,-47],\quad
+\alpha\in[-1,2.5],\quad
+\log_{10}A_2\in[-9.5,-5.5].
+\end{equation}
 
 \subsection{Posterior Constraints}
 This subsection should report the posterior constraints on the sampled parameters. For the single-multipole mode, the key results are the posteriors on $\log_{10}N_p$, $\log_{10}N_a$, $\alpha$, and $\log_{10}A_L$. For the full anisotropic mode, it should also summarize the posterior support on the $b_{\ell m}$ coefficients or derived $a_{LM}$ values.
@@ -422,5 +894,296 @@ For reproducibility, the main implementation pieces described above are currentl
 \item \texttt{blip/src/dynesty\_engine.py}, \texttt{blip/src/nessai\_engine.py}, and \texttt{blip/src/emcee\_engine.py}: posterior samplers.
 \end{itemize}
 If this manuscript is used as the basis for a methods section in a publication, version-controlling the exact BLIP commit hash alongside the final output directory is strongly recommended.
+
+\section{Parameter Ordering and Array Shapes}
+This appendix records the internal ordering conventions used by BLIP, since these conventions determine how posterior samples map back to physics.
+
+\subsection{Parameter Ordering}
+For the model string
+\begin{equation}
+\texttt{noise+powerlaw\_multipole},
+\end{equation}
+the full transformed parameter vector is ordered as
+\begin{equation}
+\left\{
+\log_{10}N_p,\,
+\log_{10}N_a,\,
+\alpha,\,
+\log_{10}A_L
+\right\}.
+\end{equation}
+
+For the model string
+\begin{equation}
+\texttt{noise+powerlaw\_sph},
+\end{equation}
+the ordering is
+\begin{equation}
+\left\{
+\log_{10}N_p,\,
+\log_{10}N_a,\,
+\alpha,\,
+\log_{10}\Omega_0,\,
+\text{all } b_{\ell m}\text{-derived real parameters in increasing }(\ell,m)\text{ order}
+\right\}.
+\end{equation}
+The first few entries are therefore
+\begin{equation}
+\left\{
+\log_{10}N_p,\,
+\log_{10}N_a,\,
+\alpha,\,
+\log_{10}\Omega_0,\,
+b_{10},\,
+|b_{11}|,\,
+\phi_{11},\,
+b_{20},\,
+|b_{21}|,\,
+\phi_{21},\,
+|b_{22}|,\,
+\phi_{22},\dots
+\right\}.
+\end{equation}
+
+\subsection{Core Array Shapes}
+The central arrays passed through the anisotropy pipeline have the shapes listed in Table~\ref{tab:arrayshapes}.
+
+\begin{table}[H]
+\centering
+\caption{Core array shapes used internally by BLIP in the anisotropy analysis.}
+\label{tab:arrayshapes}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.34\linewidth}}
+\toprule
+Object & Shape & Meaning \\
+\midrule
+\texttt{r1}, \texttt{r2}, \texttt{r3} & $(N_f,N_t)$ & Fourier coefficients of the three analysis channels \\
+\texttt{rbar} & $(N_f,N_t,3)$ & stacked channel vector $(r_1,r_2,r_3)$ \\
+\texttt{rmat} & $(N_f,N_t,3,3)$ & data correlation matrix $\bar{\mathbf{r}}^\ast\otimes\bar{\mathbf{r}}$ \\
+\texttt{response\_mat} in isotropic mode & $(3,3,N_f,N_t)$ & detector response already integrated over sky \\
+\texttt{response\_mat} in full spherical-harmonic mode & $(3,3,N_f,N_t,N_{\mathrm{alm}})$ & harmonic response basis before sky contraction \\
+\texttt{inj\_response\_mat} & $(3,3,N_f,N_t)$ & injection-side response after any sky contraction \\
+\texttt{cov\_mat} before \texttt{moveaxis} & $(3,3,N_f,N_t)$ & summed model covariance from all submodels \\
+\texttt{cov\_mat} after \texttt{moveaxis} & $(N_f,N_t,3,3)$ & covariance layout used by \texttt{bespoke\_inv} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Compact Execution Trace}
+For quick reference, one complete likelihood call in the standard anisotropy pipeline can be summarized as:
+\begin{enumerate}
+\item draw a unit-cube point;
+\item transform it to physical parameters with the ordered prior transforms of all submodels;
+\item compute the detector-noise covariance from $(\log_{10}N_p,\log_{10}N_a)$;
+\item compute the SGWB covariance from the spectral parameters and the appropriate response matrix;
+\item sum all covariance contributions into one $3\times 3$ matrix at every $(f_k,t_n)$;
+\item invert that matrix stack with \texttt{bespoke\_inv};
+\item contract the inverse with the stored data matrix \texttt{rmat};
+\item add the log-determinant term and return the real part of the resulting log likelihood.
+\end{enumerate}
+The longer methods discussion in Section~2 expands every one of these steps, but this compressed trace is often the fastest route from the code to the mathematics.
+
+\section{Isotropic Versus Fixed-\texorpdfstring{$L$}{L} Pathways}
+This appendix isolates only the two pathways most relevant for the present production work: the isotropic SGWB model and the reduced fixed-$L$ anisotropy model. The purpose is to define the fixed-$L$ route rigorously without invoking the full sky-map reconstruction machinery. In particular, this appendix does \emph{not} discuss sampled $b_{\ell m}$ coefficients, normalized sky maps, or full harmonic reconstructions; it treats the fixed-$L$ model as its own standalone covariance model.
+
+\subsection{Common Structure}
+Both pathways live inside the same BLIP likelihood architecture. For either model, the total covariance is
+\begin{equation}
+\mathbf{C}(f_k,t_n)=\mathbf{C}_{\mathrm{noise}}(f_k)+\mathbf{C}_{\mathrm{gw}}(f_k,t_n),
+\end{equation}
+with the same detector-noise model, the same power-law spectral conversion
+\begin{equation}
+\Omega(f)=A\left(\frac{f}{f_{\mathrm{ref}}}\right)^\alpha,
+\qquad
+S_{\mathrm{gw}}(f)=\Omega(f)\,\frac{3}{4f^3}\left(\frac{H_0}{\pi}\right)^2,
+\end{equation}
+and the same Gaussian covariance likelihood. The difference between the isotropic and fixed-$L$ routes is therefore concentrated in only two places:
+\begin{enumerate}
+\item the meaning of the SGWB amplitude parameter;
+\item the way the response matrix \(\mathbf{R}\) is constructed before it is multiplied by \(S_{\mathrm{gw}}(f)\).
+\end{enumerate}
+Once that response matrix has been built, both models hand it to the same covariance routine shape,
+\begin{equation}
+\mathbf{C}_{\mathrm{gw}}(f_k,t_n)=S_{\mathrm{gw}}(f_k)\,\mathbf{R}(f_k,t_n),
+\end{equation}
+and both are evaluated against the same data matrix \(\mathbf{D}(f_k,t_n)\).
+
+\subsection{Isotropic Pathway}
+The isotropic model corresponds to the BLIP component
+\begin{equation}
+\texttt{powerlaw\_isgwb}.
+\end{equation}
+Its sampled SGWB parameters are
+\begin{equation}
+\{\alpha,\log_{10}\Omega_0\}.
+\end{equation}
+The corresponding energy-density spectrum is
+\begin{equation}
+\Omega_{\mathrm{iso}}(f)=\Omega_0\left(\frac{f}{f_{\mathrm{ref}}}\right)^\alpha,
+\end{equation}
+and the SGWB covariance is
+\begin{equation}
+\mathbf{C}^{\mathrm{iso}}_{\mathrm{gw}}(f_k,t_n)
+=S_{\mathrm{gw}}(f_k\mid \alpha,\Omega_0)\,
+\mathbf{R}_{\mathrm{iso}}(f_k,t_n).
+\end{equation}
+
+The response matrix \(\mathbf{R}_{\mathrm{iso}}\) is obtained directly from the isotropic response routines
+\begin{equation}
+\texttt{isgwb\_mich\_response},\qquad
+\texttt{isgwb\_xyz\_response},\qquad
+\texttt{isgwb\_aet\_response},
+\end{equation}
+depending on the chosen TDI basis. In Michelson form, the code computes
+\begin{equation}
+R^{\mathrm{iso}}_{IJ}(f_k,t_n)
+=\frac{\Delta\Omega}{8\pi}\sum_{p=1}^{N_{\mathrm{pix}}}
+\mathcal{F}_{IJ}(f_k,t_n,p),
+\end{equation}
+where \(\mathcal{F}_{IJ}\) is the polarization-summed channel product already defined in the main text. There is no additional angular decomposition, no projection onto a selected multipole, and no postprocessing of the response beyond the basis conversion from Michelson to XYZ or AET if required.
+
+Operationally, the isotropic branch is therefore:
+\begin{enumerate}
+\item build \(\mathbf{R}_{\mathrm{iso}}\) by direct sky averaging;
+\item compute \(S_{\mathrm{gw}}(f)\) from \((\alpha,\Omega_0)\);
+\item return \(S_{\mathrm{gw}}(f)\mathbf{R}_{\mathrm{iso}}(f,t)\).
+\end{enumerate}
+
+\subsection{Fixed-\texorpdfstring{$L$}{L} Pathway}
+The reduced anisotropy model corresponds to the BLIP component
+\begin{equation}
+\texttt{powerlaw\_multipole}.
+\end{equation}
+Its free SGWB parameters are
+\begin{equation}
+\{\alpha,\log_{10}A_L\},
+\end{equation}
+while the integer multipole label \(L\) is supplied externally in the configuration file through \texttt{multipole\_l}. Thus the model has one continuous amplitude parameter and one discrete hyperparameter,
+\begin{equation}
+L\in\{0,1,2,\dots\}.
+\end{equation}
+The spectral part is
+\begin{equation}
+\Omega_{L}(f)=A_L\left(\frac{f}{f_{\mathrm{ref}}}\right)^\alpha,
+\end{equation}
+so the entire distinction from the isotropic case is again in the response matrix.
+
+The fixed-$L$ route does \emph{not} compute a sky map and does \emph{not} sample any directional coefficients. Instead it builds an effective covariance response in four explicit steps.
+
+\paragraph{Step 1: build the anisotropic response basis only up to the selected multipole.}
+BLIP calls the anisotropic response routine with
+\begin{equation}
+\texttt{set\_almax}=L,
+\end{equation}
+so that the returned response basis contains all harmonic components from \((0,0)\) through \((L,L)\),
+\begin{equation}
+\mathbf{R}^{\mathrm{basis}}(f_k,t_n)
+\in
+\mathbb{C}^{3\times 3\times N_f\times N_t\times (L+1)^2}.
+\end{equation}
+At this stage BLIP has not yet selected any particular angular mode family; it has only asked for the anisotropic basis truncated at \(L\).
+
+\paragraph{Step 2: extract the \(2L+1\) entries with angular degree \(L\).}
+The code defines the index set
+\begin{equation}
+\mathcal{I}_L
+=\left\{i \in \{0,\dots,(L+1)^2-1\} \;:\; \ell(i)=L\right\},
+\end{equation}
+where \(\ell(i)\) is recovered from the custom \texttt{idxtoalm(L, i)} mapping. This set has cardinality
+\begin{equation}
+|\mathcal{I}_L|=2L+1.
+\end{equation}
+BLIP then forms the sub-basis
+\begin{equation}
+\mathbf{R}^{(Lm)}(f_k,t_n), \qquad m=-L,\dots,L,
+\end{equation}
+by selecting only those response-basis entries indexed by \(\mathcal{I}_L\).
+
+\paragraph{Step 3: collapse the \(m\)-dependence into one effective response matrix.}
+The defining operation of the fixed-$L$ model is the Gram-type sum
+\begin{equation}
+\mathbf{R}^{(L)}_{\mathrm{eff}}(f_k,t_n)
+=\frac{1}{2L+1}\sum_{m=-L}^{L}
+\mathbf{R}^{(Lm)}(f_k,t_n)\,
+\mathbf{R}^{(Lm)\dagger}(f_k,t_n).
+\label{eq:fixedL-gram}
+\end{equation}
+Writing this componentwise,
+\begin{equation}
+\left[R^{(L)}_{\mathrm{eff}}\right]_{ij}(f_k,t_n)
+=\frac{1}{2L+1}\sum_{m=-L}^{L}\sum_{q=1}^{3}
+R^{(Lm)}_{iq}(f_k,t_n)\,
+R^{(Lm)\ast}_{jq}(f_k,t_n).
+\end{equation}
+This is exactly the \texttt{np.einsum} contraction implemented in \texttt{compute\_single\_multipole\_response}. The result is a \(3\times 3\) matrix at every frequency and time.
+
+\paragraph{Step 4: enforce Hermiticity explicitly.}
+After the Gram sum, BLIP replaces the effective response by
+\begin{equation}
+\mathbf{R}^{(L)}_{\mathrm{eff}}
+\leftarrow
+\frac{1}{2}\left(
+\mathbf{R}^{(L)}_{\mathrm{eff}}
++\mathbf{R}^{(L)\dagger}_{\mathrm{eff}}
+\right).
+\end{equation}
+This step is not conceptually new physics; it is a numerical cleanup step that guarantees exact Hermiticity in floating-point arithmetic before the likelihood is evaluated.
+
+Once these four steps are complete, the fixed-$L$ SGWB covariance is simply
+\begin{equation}
+\mathbf{C}^{(L)}_{\mathrm{gw}}(f_k,t_n)
+=S_{\mathrm{gw}}(f_k\mid \alpha,A_L)\,
+\mathbf{R}^{(L)}_{\mathrm{eff}}(f_k,t_n).
+\end{equation}
+At that point BLIP reuses the same covariance machinery as the isotropic model.
+
+\subsection{Exact Point of Departure in the Code}
+The isotropic and fixed-$L$ branches are identical at the levels of
+\begin{equation}
+\text{FFT construction},\quad
+\text{noise covariance},\quad
+\text{spectral conversion},\quad
+\text{likelihood evaluation}.
+\end{equation}
+They diverge only when the response matrix is assigned inside \texttt{submodel.\_\_init\_\_}. In compact pseudocode, BLIP is doing
+\begin{align}
+\text{isotropic:}\quad
+&\texttt{response\_mat} \leftarrow \texttt{isgwb\_*\_response}(f_0,t), \\
+&\texttt{cov} \leftarrow \texttt{compute\_cov\_isgwb}; \\
+\text{fixed-}L:\quad
+&\texttt{basis} \leftarrow \texttt{asgwb\_*\_response}(f_0,t,\texttt{set\_almax}=L), \\
+&\texttt{response\_mat} \leftarrow \texttt{compute\_single\_multipole\_response}(\texttt{basis},L), \\
+&\texttt{cov} \leftarrow \texttt{compute\_cov\_isgwb}.
+\end{align}
+This is an important implementation point: the fixed-$L$ model is not given its own bespoke covariance evaluator. Instead, it manufactures a different response matrix and then hands that matrix to the same isotropic covariance wrapper used by \texttt{powerlaw\_isgwb}.
+
+\subsection{What the Amplitudes Mean}
+The isotropic and fixed-$L$ amplitudes are not interchangeable.
+
+\paragraph{Isotropic amplitude.}
+\(\Omega_0\) is the overall normalization of a monopole-only SGWB model. It multiplies a response matrix that has already been averaged over the whole sky with no selected angular scale.
+
+\paragraph{Fixed-\texorpdfstring{$L$}{L} amplitude.}
+\(A_L\) is the total power assigned to the single angular scale \(L\) after BLIP has averaged over the \(m\)-modes through Eq.~(\ref{eq:fixedL-gram}). It does not specify an orientation, a phase pattern, or a sky map. It says only how much covariance power is assigned to the fixed multipole family selected by \(L\).
+
+Equivalently, the isotropic and fixed-$L$ models answer different questions:
+\begin{align}
+\text{isotropic:}\quad & \text{``How much sky-averaged SGWB power is present?''} \\
+\text{fixed-}L:\quad & \text{``How much covariance power is present at angular scale }L\text{ after averaging over }m\text{?''}
+\end{align}
+
+\subsection{The Fixed-\texorpdfstring{$L$}{L} Model Is Not the Same as the Isotropic Model}
+It is tempting to think of the fixed-$L$ branch as ``the isotropic model plus a multipole label,'' but that is not what the code implements. The isotropic route uses a direct sky average of channel products, whereas the fixed-$L$ route uses a Gram sum over anisotropic response-basis elements. Even at \(L=0\), the fixed-$L$ model remains the \(L=0\) member of the \emph{fixed-$L$ family}; it does not collapse onto the isotropic code path. The two models therefore agree in architecture but not in the exact response operator they place under the spectrum.
+
+\subsection{Minimal Rigorous Summary}
+If one strips away all broader anisotropy language and keeps only what is required to define the reduced model rigorously, the fixed-$L$ pathway is:
+\begin{enumerate}
+\item choose the discrete multipole \(L\);
+\item compute the anisotropic response basis up to that \(L\);
+\item keep only the \(2L+1\) basis elements with angular degree \(L\);
+\item combine them into the Hermitian positive-semidefinite matrix \(\mathbf{R}^{(L)}_{\mathrm{eff}}\) via Eq.~(\ref{eq:fixedL-gram});
+\item scale that matrix by the scalar SGWB spectrum \(S_{\mathrm{gw}}(f\mid \alpha,A_L)\);
+\item add the result to the detector-noise covariance and evaluate the usual BLIP likelihood.
+\end{enumerate}
+That is the full fixed-$L$ model as implemented in BLIP, stated without reference to the full sky-pattern inference problem.
 
 \end{document}

@@ -290,6 +290,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         elif self.spatial_model_name == 'multipole':
             self.multipole_l = self.get_selected_multipole_l()
             response_kwargs['set_almax'] = self.multipole_l
+            response_kwargs['set_lm_pairs'] = self.get_single_multipole_lm_pairs(self.multipole_l)
             
             if self.params['tdi_lev']=='michelson':
                 self.response = self.asgwb_mich_response
@@ -302,7 +303,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             
             ## build one effective fixed-L response by summing over m in quadrature
             multipole_response_basis = self.response(f0,tsegmid,**response_kwargs)
-            self.response_mat = self.compute_single_multipole_response(multipole_response_basis,self.multipole_l)
+            self.response_mat = self.compute_single_multipole_response(multipole_response_basis,self.multipole_l,basis_already_selected=True)
             
             ## plotting stuff
             self.fancyname = "Single Multipole $L={}$ ".format(self.multipole_l) + self.fancyname
@@ -573,7 +574,13 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         return [ii for ii in range((multipole_l + 1)**2) if self.idxtoalm(multipole_l, ii)[0] == multipole_l]
     
-    def compute_single_multipole_response(self,response_basis_mat,multipole_l):
+    def get_single_multipole_lm_pairs(self,multipole_l):
+        '''
+        Return the ordered (L, m) pairs needed by the fixed-multipole mode.
+        '''
+        return [(multipole_l, mval) for mval in range(-multipole_l, multipole_l + 1)]
+    
+    def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
         '''
         Build a statistically isotropic covariance response for the total power in one fixed multipole L.
         
@@ -582,10 +589,13 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         normalized by 2L+1. Because R_m is dimensionless, this returns a valid positive semi-definite 
         dimensionless response matrix ready to be scaled by the total power amplitude A_L.
         '''
-        multipole_indices = self.get_single_multipole_indices(multipole_l)
-        multipole_response = response_basis_mat[:, :, :, :, multipole_indices]
+        if basis_already_selected:
+            multipole_response = response_basis_mat
+        else:
+            multipole_indices = self.get_single_multipole_indices(multipole_l)
+            multipole_response = response_basis_mat[:, :, :, :, multipole_indices]
         effective_response_sq = np.einsum('ikftm,jkftm->ijft', multipole_response, np.conj(multipole_response))
-        effective_response_sq = effective_response_sq / len(multipole_indices)
+        effective_response_sq = effective_response_sq / multipole_response.shape[-1]
         
         ## Ensure Hermitian symmetry explicitly
         effective_response_sq = 0.5 * (effective_response_sq + np.swapaxes(np.conj(effective_response_sq), 0, 1))
@@ -996,7 +1006,11 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             print("Attempted to recompute response matrix, but there is already an attached response matrix at these times and frequencies. Returning the original...")
             return self.response_mat
         else:
-            return self.response(f0,tsegmid,**self.response_kwargs)
+            response_mat = self.response(f0,tsegmid,**self.response_kwargs)
+            if self.spatial_model_name == 'multipole':
+                basis_already_selected = 'set_lm_pairs' in self.response_kwargs
+                return self.compute_single_multipole_response(response_mat,self.multipole_l,basis_already_selected=basis_already_selected)
+            return response_mat
 
 
 

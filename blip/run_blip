@@ -3,6 +3,7 @@
 import pickle
 import numpy as np
 import sys, os,configparser, subprocess
+import copy
 sys.path.append(os.getcwd()) ## this lets python find src
 from blip.src.makeLISAdata import LISAdata
 from blip.src.models import Model, Injection
@@ -41,6 +42,148 @@ def format_prior_bounds_summary(prior_bounds):
             bounds = [float(prior_bounds[key][0]), float(prior_bounds[key][1])]
             parts.append("{}={}".format(key, bounds))
     return ', '.join(parts)
+
+
+def parse_int_list(config, section, option, fallback=None):
+    '''
+    Parse a config option containing a list/tuple of integers.
+    '''
+    if not config.has_section(section) or not config.has_option(section, option):
+        return fallback
+    values = eval(str(config.get(section, option)))
+    if isinstance(values, (int, np.integer)):
+        values = [int(values)]
+    else:
+        values = [int(value) for value in values]
+    return values
+
+
+class AnalysisBundle():
+    '''
+    Minimal wrapper with the attributes expected by the sampler/plotting helpers.
+    '''
+    def __init__(self, model, injection=None):
+        self.Model = model
+        self.Injection = injection
+
+
+def save_model_and_injection(out_dir, model, injection=None):
+    '''
+    Persist the model and, when available, a slimmed injection object.
+    '''
+    with open(out_dir + '/model.pickle', 'wb') as outfile:
+        pickle.dump(model, outfile)
+    
+    if injection is not None:
+        injection_to_save = copy.deepcopy(injection)
+        for cmn in injection_to_save.component_names:
+            if hasattr(injection_to_save.components[cmn], 'response_mat'):
+                del injection_to_save.components[cmn].response_mat
+            if hasattr(injection_to_save.components[cmn], 'summ_response_mat'):
+                del injection_to_save.components[cmn].summ_response_mat
+            if hasattr(injection_to_save.components[cmn], 'inj_response_mat'):
+                del injection_to_save.components[cmn].inj_response_mat
+        with open(out_dir + '/injection.pickle', 'wb') as outfile:
+            pickle.dump(injection_to_save, outfile)
+
+
+def summarize_parameter(samples, column):
+    '''
+    Return the [2.5, 50, 97.5] percentiles for one posterior column.
+    '''
+    qlo, qmed, qhi = np.quantile(samples[:, column], [0.025, 0.5, 0.975])
+    return float(qlo), float(qmed), float(qhi)
+
+
+def summarize_multipole_recovery(model, samples, multipole_l, logz, logzerr):
+    '''
+    Collect the sweep-summary statistics for one fixed-L recovery run.
+    '''
+    parameter_lookup = {name: idx for idx, name in enumerate(model.parameters['all'])}
+    noise_submodel = next((sm for sm in model.submodels.values() if sm.name.split('-')[0] == 'noise'), None)
+    multipole_submodel = next((sm for sm in model.submodels.values() if sm.name.split('-')[0].split('_')[-1] == 'multipole'), None)
+    if multipole_submodel is None:
+        raise ValueError("Cannot summarize a multipole recovery without a fixed-L multipole submodel.")
+    
+    def percentile_summary(parameter_name):
+        if parameter_name is None or parameter_name not in parameter_lookup:
+            return np.nan, np.nan, np.nan
+        return summarize_parameter(samples, parameter_lookup[parameter_name])
+    
+    noise_parameters = noise_submodel.spectral_parameters if noise_submodel is not None else []
+    alpha_name = next((name for name in multipole_submodel.spectral_parameters if r'$\alpha' in name), None)
+    amplitude_name = multipole_submodel.get_single_multipole_amplitude_parameter()
+    
+    _, log_np_med, _ = percentile_summary(noise_parameters[0] if len(noise_parameters) > 0 else None)
+    _, log_na_med, _ = percentile_summary(noise_parameters[1] if len(noise_parameters) > 1 else None)
+    _, alpha_med, _ = percentile_summary(alpha_name)
+    amp_q025, amp_med, amp_q975 = percentile_summary(amplitude_name)
+    
+    return {
+        'multipole_l': multipole_l,
+        'logz': float(np.ravel(logz)[-1]),
+        'logzerr': float(np.ravel(logzerr)[-1]),
+        'median_log_Np': log_np_med,
+        'median_log_Na': log_na_med,
+        'median_alpha': alpha_med,
+        'median_log_A_L': amp_med,
+        'q025_log_A_L': amp_q025,
+        'q975_log_A_L': amp_q975,
+    }
+
+
+def write_multipole_sweep_summary(out_dir, summary_rows):
+    '''
+    Save a machine-readable summary table and a compact comparison plot for a multipole sweep.
+    '''
+    if len(summary_rows) == 0:
+        return
+    
+    summary_rows = sorted(summary_rows, key=lambda row: row['multipole_l'])
+    best_logz = max(row['logz'] for row in summary_rows)
+    
+    header = "multipole_l logz logzerr delta_logz median_log_Np median_log_Na median_alpha median_log_A_L q025_log_A_L q975_log_A_L"
+    table = []
+    for row in summary_rows:
+        delta_logz = row['logz'] - best_logz
+        table.append([
+            row['multipole_l'],
+            row['logz'],
+            row['logzerr'],
+            delta_logz,
+            row['median_log_Np'],
+            row['median_log_Na'],
+            row['median_alpha'],
+            row['median_log_A_L'],
+            row['q025_log_A_L'],
+            row['q975_log_A_L'],
+        ])
+    
+    np.savetxt(out_dir + '/multipole_sweep_summary.txt', np.asarray(table), header=header)
+    
+    multipoles = [row['multipole_l'] for row in summary_rows]
+    delta_logz = [row['logz'] - best_logz for row in summary_rows]
+    med_logA = [row['median_log_A_L'] for row in summary_rows]
+    q025_logA = [row['q025_log_A_L'] for row in summary_rows]
+    q975_logA = [row['q975_log_A_L'] for row in summary_rows]
+    err_low = np.asarray(med_logA) - np.asarray(q025_logA)
+    err_high = np.asarray(q975_logA) - np.asarray(med_logA)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    axes[0].plot(multipoles, delta_logz, marker='o', color='slateblue')
+    axes[0].axhline(0.0, color='0.5', ls='--', lw=1)
+    axes[0].set_xlabel('Recovery multipole L')
+    axes[0].set_ylabel(r'$\Delta \log Z$')
+    axes[0].set_title('Relative evidence')
+    
+    axes[1].errorbar(multipoles, med_logA, yerr=[err_low, err_high], marker='o', color='royalblue', lw=1.5, capsize=3)
+    axes[1].set_xlabel('Recovery multipole L')
+    axes[1].set_ylabel(r'$\log_{10}(A_L)$')
+    axes[1].set_title('Recovered total-power amplitude')
+    
+    plt.tight_layout()
+    fig.savefig(out_dir + '/multipole_sweep_summary.png', dpi=200)
+    plt.close(fig)
 
 class LISA(LISAdata, Model):
 
@@ -365,6 +508,137 @@ class LISA(LISAdata, Model):
         plt.close()
 
 
+def run_multipole_sweep(paramsfile, params, inj, nlive, nthread, resume=False):
+    '''
+    Generate or load one shared dataset, then run a bank of fixed-L recovery analyses against that same data.
+    
+    This is intended for answering the physically meaningful question:
+    given one SGWB realization, which recovery multipoles are actually preferred/measurable?
+    '''
+    if resume:
+        raise TypeError("Resume mode is not supported for multipole sweeps yet.")
+    if params['sampler'] != 'dynesty':
+        raise TypeError("The multipole sweep mode currently supports the dynesty sampler only.")
+    from blip.src.dynesty_engine import dynesty_engine
+    model_components = params['model'].split('+')
+    multipole_components = [component for component in model_components if component.split('_')[-1] == 'multipole']
+    if len(multipole_components) == 0:
+        raise TypeError("The multipole sweep mode requires a recovery model containing the fixed-L 'multipole' spatial model.")
+    if len(multipole_components) != 1 or multipole_components[0].split('_')[0] != 'powerlaw':
+        raise TypeError("The multipole sweep mode currently supports exactly one 'powerlaw_multipole' recovery component.")
+    if not params.get('multipole_sweep', 0):
+        raise ValueError("run_multipole_sweep was called without enabling multipole_sweep.")
+    sweep_multipoles = params.get('sweep_multipoles', None)
+    if sweep_multipoles is None or len(sweep_multipoles) == 0:
+        raise ValueError("The multipole sweep mode requires a non-empty 'sweep_multipoles' list in [run_params].")
+    
+    sweep_multipoles = sorted(list(dict.fromkeys([int(value) for value in sweep_multipoles])))
+    if np.any([value < 0 for value in sweep_multipoles]):
+        raise ValueError("All recovery multipoles in sweep_multipoles must be >= 0.")
+    
+    sweep_root = params['out_dir'].rstrip('/')
+    subprocess.call(["mkdir", "-p", sweep_root])
+    subprocess.call(["cp", paramsfile, sweep_root])
+    
+    shared_params = copy.deepcopy(params)
+    shared_params['multipole_sweep'] = 0
+    shared_params['out_dir'] = sweep_root + '/shared_data'
+    subprocess.call(["mkdir", "-p", shared_params['out_dir']])
+    
+    print("Preparing shared dataset for multipole sweep...")
+    shared_lisa = LISA(shared_params, inj)
+    save_model_and_injection(shared_params['out_dir'], shared_lisa.Model, None if shared_params['load_data'] else shared_lisa.Injection)
+    if not shared_params['load_data']:
+        for cmn in shared_lisa.Injection.component_names:
+            if hasattr(shared_lisa.Injection.components[cmn], 'response_mat'):
+                del shared_lisa.Injection.components[cmn].response_mat
+            if hasattr(shared_lisa.Injection.components[cmn], 'summ_response_mat'):
+                del shared_lisa.Injection.components[cmn].summ_response_mat
+            if hasattr(shared_lisa.Injection.components[cmn], 'inj_response_mat'):
+                del shared_lisa.Injection.components[cmn].inj_response_mat
+    
+    shared_parameters = shared_lisa.Model.parameters
+    with open(shared_params['out_dir'] + '/config.pickle', 'wb') as outfile:
+        pickle.dump(shared_params, outfile)
+        pickle.dump(inj, outfile)
+        pickle.dump(shared_parameters, outfile)
+    
+    summary_rows = []
+    
+    for sweep_idx, multipole_l in enumerate(sweep_multipoles):
+        print("\n[Multipole sweep] Recovering with L={}".format(multipole_l))
+        run_params = copy.deepcopy(params)
+        run_params['multipole_sweep'] = 0
+        run_params['multipole_l'] = multipole_l
+        if run_params['FixSeed']:
+            run_params['seed'] = int(params['seed']) + sweep_idx + 1
+        run_params['out_dir'] = sweep_root + '/recover_l{:02d}'.format(multipole_l)
+        subprocess.call(["mkdir", "-p", run_params['out_dir']])
+        
+        run_model = Model(run_params, inj, shared_lisa.fdata, shared_lisa.f0, shared_lisa.tsegmid, shared_lisa.rmat)
+        if not shared_params['load_data']:
+            ensure_color_matching(run_model, shared_lisa.Injection)
+        analysis_bundle = AnalysisBundle(run_model, None if shared_params['load_data'] else shared_lisa.Injection)
+        
+        save_model_and_injection(run_params['out_dir'], run_model, None if shared_params['load_data'] else shared_lisa.Injection)
+        
+        if run_params['FixSeed']:
+            from blip.tools.SetRandomState import SetRandomState as setrs
+            run_randst = setrs(run_params['seed'])
+        else:
+            run_randst = None
+        
+        if nthread > 1:
+            pool = Pool(nthread)
+        else:
+            pool = None
+        
+        engine, parameters = dynesty_engine().define_engine(analysis_bundle, run_params, nlive, nthread, run_randst, pool=pool)
+        if run_params['checkpoint']:
+            checkpoint_file = run_params['out_dir'] + '/checkpoint.pickle'
+            t1 = time.time()
+            post_samples, logz, logzerr = dynesty_engine.run_engine_with_checkpointing(engine, parameters, run_params['checkpoint_interval'], checkpoint_file)
+            t2 = time.time()
+        else:
+            t1 = time.time()
+            post_samples, logz, logzerr = dynesty_engine.run_engine(engine)
+            t2 = time.time()
+        print("[Multipole sweep] L={} elapsed time: {} s".format(multipole_l, t2 - t1))
+        
+        if nthread > 1 and engine.pool is not None:
+            engine.pool.close()
+            engine.pool.join()
+        
+        np.savetxt(run_params['out_dir'] + "/post_samples.txt", post_samples)
+        np.savetxt(run_params['out_dir'] + "/logz.txt", logz)
+        np.savetxt(run_params['out_dir'] + "/logzerr.txt", logzerr)
+        
+        with open(run_params['out_dir'] + '/config.pickle', 'wb') as outfile:
+            pickle.dump(run_params, outfile)
+            pickle.dump(inj, outfile)
+            pickle.dump(parameters, outfile)
+        
+        print("[Multipole sweep] Making plots for L={}...".format(multipole_l))
+        if not shared_params['load_data']:
+            plotmaker(post_samples, run_params, parameters, inj, run_model, shared_lisa.Injection)
+            fitmaker(post_samples, run_params, parameters, inj, run_model, shared_lisa.Injection)
+        else:
+            plotmaker(post_samples, run_params, parameters, inj, run_model)
+            fitmaker(post_samples, run_params, parameters, inj, run_model)
+        if np.any([run_model.submodels[sm_name].has_map for sm_name in run_model.submodel_names]):
+            if 'healpy_proj' in run_params.keys():
+                mapmaker(post_samples, run_params, parameters, run_model, coord=run_params['healpy_proj'])
+            else:
+                mapmaker(post_samples, run_params, parameters, run_model)
+        
+        samples_2d = np.atleast_2d(post_samples)
+        summary_rows.append(summarize_multipole_recovery(run_model, samples_2d, multipole_l, logz, logzerr))
+    
+    write_multipole_sweep_summary(sweep_root, summary_rows)
+    print("\nMultipole sweep summary written to {}/multipole_sweep_summary.txt".format(sweep_root))
+    print("Multipole sweep comparison plot written to {}/multipole_sweep_summary.png".format(sweep_root))
+
+
 def blip(paramsfile='params.ini',resume=False):
     '''
     The main workhorse of the bayesian pipeline.
@@ -494,6 +768,8 @@ def blip(paramsfile='params.ini',resume=False):
 
     # some run parameters
     params['out_dir']            = str(config.get("run_params", "out_dir"))
+    params['multipole_sweep']    = int(config.get("run_params", "multipole_sweep", fallback=0))
+    params['sweep_multipoles']   = parse_int_list(config, "run_params", "sweep_multipoles", fallback=None)
 
     params['doPreProc']          = int(config.get("run_params", "doPreProc", fallback=0))
     params['input_spectrum']     = str(config.get("run_params", "input_spectrum", fallback='data_spectrum.npz'))
@@ -546,6 +822,13 @@ def blip(paramsfile='params.ini',resume=False):
         if resume:
             raise TypeError("Resuming from a checkpoint requires re-generation of data, so the random seed MUST be fixed.")
         randst = None
+    
+    if params['multipole_sweep']:
+        if params['sweep_multipoles'] is None:
+            sweep_default = max(params.get('multipole_l', -1), inj.get('multipole_l', -1))
+            params['sweep_multipoles'] = list(range(sweep_default + 1))
+        run_multipole_sweep(paramsfile, params, inj, nlive, nthread, resume=resume)
+        return
 
 
     if not resume:

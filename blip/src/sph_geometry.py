@@ -17,9 +17,36 @@ class sph_geometry(clebschGordan):
 
     def __init__(self):
         clebschGordan.__init__(self)
+    
+    def get_response_lm_pairs(self, almax, set_lm_pairs=None):
+        '''
+        Resolve the ordered list of (l, m) modes to evaluate in the anisotropic response basis.
+        
+        When no explicit list is supplied, this reproduces the legacy behavior of building the full
+        basis up to almax. Fixed-multipole runs can instead pass only the desired 2L+1 modes.
+        '''
+        if set_lm_pairs is None:
+            return [self.idxtoalm(almax, ii) for ii in range((almax + 1)**2)]
+        
+        lm_pairs = []
+        for lval, mval in set_lm_pairs:
+            lval = int(lval)
+            mval = int(mval)
+            if lval < 0:
+                raise ValueError("Spherical-harmonic mode lists require l >= 0.")
+            if abs(mval) > lval:
+                raise ValueError("Invalid spherical-harmonic mode (l={}, m={}).".format(lval, mval))
+            if lval > almax:
+                raise ValueError("Requested mode (l={}, m={}) exceeds almax={}.".format(lval, mval, almax))
+            lm_pairs.append((lval, mval))
+        
+        if len(lm_pairs) == 0:
+            raise ValueError("At least one spherical-harmonic mode must be requested.")
+        
+        return lm_pairs
 
 
-    def asgwb_mich_response(self, f0, tsegmid, set_almax=None):
+    def asgwb_mich_response(self, f0, tsegmid, set_almax=None, set_lm_pairs=None):
 
         '''
         Calculate the Antenna pattern/ detector transfer function functions to acSGWB using michelson channels,
@@ -39,6 +66,8 @@ class sph_geometry(clebschGordan):
         set_almax : int
             Allows the user to manually set the almax used in the response function calculations.
             If None, almax will default to the globally set self.almax. Otherwise almax will be the value given.
+        set_lm_pairs : iterable of tuple, optional
+            Explicit (l, m) modes to evaluate. If omitted, the full basis up to almax is used.
 
         Returns
         ---------
@@ -56,8 +85,9 @@ class sph_geometry(clebschGordan):
         else:
             almax = set_almax
         
-        ## array size of almax
-        alm_size = (almax + 1)**2
+        ## ordered list of requested spherical-harmonic modes
+        lm_pairs = self.get_response_lm_pairs(almax, set_lm_pairs=set_lm_pairs)
+        alm_size = len(lm_pairs)
 
         npix = hp.nside2npix(self.params['nside'])
 
@@ -133,8 +163,7 @@ class sph_geometry(clebschGordan):
         Ylms = np.zeros((npix, alm_size ), dtype='complex')
 
         ## Get the spherical harmonics
-        for ii in range(alm_size):
-            lval, mval = self.idxtoalm(almax, ii)
+        for ii, (lval, mval) in enumerate(lm_pairs):
             Ylms[:, ii] = sph_harm(mval, lval, phi, theta)
 
 
@@ -198,7 +227,7 @@ class sph_geometry(clebschGordan):
         return response_mat
 
 
-    def asgwb_xyz_response(self, f0, tsegmid, set_almax=None):
+    def asgwb_xyz_response(self, f0, tsegmid, set_almax=None, set_lm_pairs=None):
 
         '''
         Calculate the Antenna pattern/ detector transfer function functions to acSGWB using X,Y,Z TDI channels,
@@ -218,6 +247,8 @@ class sph_geometry(clebschGordan):
         set_almax : int
             Allows the user to manually set the almax used in the response function calculations.
             If None, almax will default to the globally set self.almax. Otherwise almax will be the value given.
+        set_lm_pairs : iterable of tuple, optional
+            Explicit (l, m) modes to evaluate. If omitted, the full basis up to almax is used.
 
         Returns
         ---------
@@ -227,13 +258,13 @@ class sph_geometry(clebschGordan):
             over polarization. The arrays are 2-d, one direction corresponds to frequency and the other to the l coeffcient.
         '''
 
-        mich_response_mat = self.asgwb_mich_response(f0, tsegmid, set_almax)
+        mich_response_mat = self.asgwb_mich_response(f0, tsegmid, set_almax=set_almax, set_lm_pairs=set_lm_pairs)
         xyz_response_mat = 4 * mich_response_mat * (np.sin(2*f0[None, None, :, None, None]))**2
 
         return xyz_response_mat
 
 
-    def asgwb_aet_response(self, f0, tsegmid, set_almax=None):
+    def asgwb_aet_response(self, f0, tsegmid, set_almax=None, set_lm_pairs=None):
 
         '''
         Calculate the Antenna pattern/ detector transfer function functions to acSGWB using X,Y,Z TDI channels,
@@ -255,6 +286,8 @@ class sph_geometry(clebschGordan):
         set_almax : int
             Allows the user to manually set the almax used in the response function calculations.
             If None, almax will default to the globally set self.almax. Otherwise almax will be the value given.
+        set_lm_pairs : iterable of tuple, optional
+            Explicit (l, m) modes to evaluate. If omitted, the full basis up to almax is used.
 
 
         Returns
@@ -265,7 +298,7 @@ class sph_geometry(clebschGordan):
             over polarization. The arrays are 2-d, one direction corresponds to frequency and the other to the l coeffcient.
         '''
 
-        xyz_response_mat = self.asgwb_xyz_response(f0, tsegmid, set_almax)
+        xyz_response_mat = self.asgwb_xyz_response(f0, tsegmid, set_almax=set_almax, set_lm_pairs=set_lm_pairs)
 
         ## Upnack xyz matrix to make assembling the aet matrix easier
         RXX, RYY, RZZ = xyz_response_mat[0, 0], xyz_response_mat[1, 1], xyz_response_mat[2, 2]
@@ -290,4 +323,3 @@ class sph_geometry(clebschGordan):
                                     [np.conj(RAT), np.conj(RET), RTT] ])
 
         return aet_response_mat
-
