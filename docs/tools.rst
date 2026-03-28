@@ -28,6 +28,14 @@ tools.makeGaussianData module
    :undoc-members:
    :show-inheritance:
 
+tools.multipoleSensitivity module
+---------------------------------
+
+.. automodule:: tools.multipoleSensitivity
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 tools.plotmaker module
 ----------------------
 

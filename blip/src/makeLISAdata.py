@@ -14,6 +14,24 @@ class LISAdata():
         self.inj = inj
         self.armlength = 2.5e9 ## armlength in meters
 
+    def resolve_input_spectrum_path(self):
+
+        '''
+        Resolve the configured cached spectrum path.
+
+        Bare filenames are stored inside params['out_dir'], preserving the
+        historic BLIP behavior. Paths that already include a directory are
+        treated as user-specified locations relative to the working directory
+        unless they are already absolute.
+        '''
+
+        input_spectrum = self.params['input_spectrum']
+        if os.path.isabs(input_spectrum):
+            return input_spectrum
+        if os.path.dirname(input_spectrum):
+            return os.path.abspath(input_spectrum)
+        return os.path.join(self.params['out_dir'], input_spectrum)
+
 
     ## Method for reading frequency domain spectral data if given in an npz file
     def read_spectrum(self):
@@ -28,16 +46,19 @@ class LISAdata():
 
         '''
 
-        if os.path.isfile(self.params['input_spectrum']) and not self.params['doPreProc']:
-            print("loading freq domain data from input file")
+        spectrum_path = self.resolve_input_spectrum_path()
 
-            data = np.load(self.params['out_dir'] + '/' +self.params['input_spectrum'])
+        if os.path.isfile(spectrum_path) and not self.params['doPreProc']:
+            print("loading freq domain data from input file {}".format(spectrum_path))
+
+            data = np.load(spectrum_path)
             r1    = data['r1']
             r2    = data['r2']
             r3    = data['r3']
             fdata = data['fdata']
 
             return r1, r2, r3, fdata
+        return None
 
 
 
@@ -279,7 +300,11 @@ class LISAdata():
         r3 = np.sqrt(2/win_fact)*r3[idx, :]/(self.params['fs']*np.sqrt(self.params['seglen']))
 
 
-        np.savez(self.params['out_dir'] + '/' +self.params['input_spectrum'], r1=r1, r2=r2, r3=r3, fdata=fdata)
+        spectrum_path = self.resolve_input_spectrum_path()
+        spectrum_dir = os.path.dirname(spectrum_path)
+        if spectrum_dir:
+            os.makedirs(spectrum_dir, exist_ok=True)
+        np.savez(spectrum_path, r1=r1, r2=r2, r3=r3, fdata=fdata)
 
         return r1, r2, r3, fdata, tsegstart, tsegmid
 
