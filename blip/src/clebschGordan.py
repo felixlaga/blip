@@ -1,5 +1,8 @@
 import numpy as np
-from healpy import Alm
+from blip.src.healpy_compat import ensure_healpy_compat
+
+ensure_healpy_compat()
+from healpy.sphtfunc import Alm
 from sympy.physics.quantum.cg import CG
 
 

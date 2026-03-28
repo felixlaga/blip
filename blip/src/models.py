@@ -255,14 +255,23 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.prior = self.sph_prior
                 self.cov = self.compute_cov_asgwb
             else:
+                if 'blms' not in self.injvals:
+                    raise KeyError(
+                        "Missing 'blms' for anisotropic injection component '{}' in [inj] truevals.".format(
+                            submodel_full_name
+                        )
+                    )
+
+                inj_blms = self.injvals['blms']
+
                 ## get blm truevals
-                val_list = self.blms_2_blm_params(inj['blms'])
+                val_list = self.blms_2_blm_params(inj_blms)
                 
                 for param, val in zip(blm_parameters,val_list):
                     self.truevals[param] = val
                 
                 ## get alms
-                self.alms_inj = self.compute_skymap_alms(inj['blms'])
+                self.alms_inj = self.compute_skymap_alms(inj_blms)
                 ## get sph basis skymap
                 self.sph_skymap =  hp.alm2map(self.alms_inj[0:hp.Alm.getsize(self.almax)],self.params['nside'])
                 ## get response integrated over the Ylms

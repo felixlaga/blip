@@ -10,8 +10,8 @@ mpl.rcParams.update({'font.size': 18})
 
 def stochasticSensitivity(L):
     '''
-    This script calcualtes the sensititvity of LISA to an isotropic SGWB. It
-    assumes an equal arm staionary LISA. Nevertheless we implement TDI as
+    This script calculates the sensitivity of LISA to an isotropic SGWB. It
+    assumes an equal arm stationary LISA. Nevertheless we implement TDI as
     described in http://iopscience.iop.org/article/10.1088/0264-9381/18/17/308
 
     The noise levels are taken from the 2017 LISA proposal. The only input is

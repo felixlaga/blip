@@ -1,20 +1,30 @@
 #!/bin/env python3
 
+import os
+
+os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp")
+
 import pickle
 import numpy as np
-import sys, os,configparser, subprocess
+import sys, configparser, subprocess
 sys.path.append(os.getcwd()) ## this lets python find src
 from blip.src.makeLISAdata import LISAdata
-from blip.src.models import Model, Injection
 from blip.src.utils import ensure_color_matching
-from blip.tools.plotmaker import plotmaker
-from blip.tools.plotmaker import mapmaker
-from blip.tools.plotmaker import fitmaker
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
 import time
 
-class LISA(LISAdata, Model):
+FORECAST_MODEL_NAME = 'powerlaw_single_multipole'
+
+
+def parse_prior_bounds(config, key, default):
+    if config.has_option("priors", key):
+        return list(eval(str(config.get("priors", key))))
+    return default
+
+
+class LISA(LISAdata):
 
     '''
     Generic class for getting data and setting up the prior space
@@ -23,6 +33,7 @@ class LISA(LISAdata, Model):
     '''
 
     def __init__(self,  params, inj):
+        from blip.src.models import Model
 
         # set up the LISAdata class
         LISAdata.__init__(self, params, inj)
@@ -50,6 +61,7 @@ class LISA(LISAdata, Model):
             
 
     def makedata(self):
+        from blip.src.models import Injection
 
         '''
         Just a wrapper function to use the methods the LISAdata class
@@ -370,6 +382,11 @@ def blip(paramsfile='params.ini',resume=False):
     params['fref'] = float(config.get("params", "fref", fallback=25))
     
     params['model'] = str(config.get("params", "model"))
+    params['forecast_model'] = params['model'] == FORECAST_MODEL_NAME
+    params['multipole_l'] = int(config.get("params", "multipole_l", fallback=0))
+    params['target_snr'] = float(config.get("params", "target_snr", fallback=1.0))
+    params['bin_snr_target'] = float(config.get("params", "bin_snr_target", fallback=1.0))
+    params['forecast_alpha_default'] = float(config.get("params", "forecast_alpha_default", fallback=0.0))
     
     params['alias'] = eval(str(config.get("params","alias",fallback="{}")))
 
@@ -378,9 +395,25 @@ def blip(paramsfile='params.ini',resume=False):
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
+    params['prior_bounds'] = {
+        'alpha': parse_prior_bounds(config, 'alpha', [-5, 5]),
+        'log_A_c': parse_prior_bounds(
+            config,
+            'log_A_c',
+            parse_prior_bounds(
+                config,
+                'log_omega0',
+                [-14, 8],
+            ),
+        ),
+        'log_omega0': parse_prior_bounds(config, 'log_omega0', [-14, 8]),
+    }
 
     ## see if we need to initialize the spherical harmonic subroutines
-    sph_check = [sublist.split('-')[0].split('_')[-1] for sublist in params['model'].split('+')]
+    if params['forecast_model']:
+        sph_check = []
+    else:
+        sph_check = [sublist.split('-')[0].split('_')[-1] for sublist in params['model'].split('+')]
 
     # Injection Dict
     inj['doInj']         = int(config.get("inj", "doInj"))
@@ -403,13 +436,17 @@ def blip(paramsfile='params.ini',resume=False):
         for component_name in truevals.keys():
             inj['truevals'][component_name] = {}
             for name in truevals[component_name].keys():
-                if name in log_list:
-                    new_name = "log_"+name
+                if name in log_list or name in ['A_c', 'Ac']:
+                    if name in ['A_c', 'Ac']:
+                        new_name = "log_A_c"
+                    else:
+                        new_name = "log_"+name
                     inj['truevals'][component_name][new_name] = np.log10(truevals[component_name][name])
                 else:
                     inj['truevals'][component_name][name] = truevals[component_name][name]
         ## add injections to the spherical harmonic check if needed
-        sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
+        if not params['forecast_model']:
+            sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
         
     ## set sph flags
     params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check)
@@ -455,6 +492,9 @@ def blip(paramsfile='params.ini',resume=False):
     if params['FixSeed']:
         params['seed']               = int(config.get("run_params", "seed"))
     nthread                      = int(config.get("run_params", "Nthreads", fallback=1))
+    params['posterior_grid_size'] = int(config.get("run_params", "posterior_grid_size", fallback=201))
+    params['posterior_samples'] = int(config.get("run_params", "posterior_samples", fallback=20000))
+    params['forecast_noisy'] = int(config.get("run_params", "forecast_noisy", fallback=0))
     
     params['colormap']       = str(config.get("run_params", "colormap", fallback='magma'))    
     
@@ -462,31 +502,39 @@ def blip(paramsfile='params.ini',resume=False):
     params['sampler'] = str(config.get("run_params", "sampler"))
     
     ## sampler setup and late-time imports to reduce dependencies
-    ## dynesty
-    if params['sampler'] == 'dynesty':
-        from blip.src.dynesty_engine import dynesty_engine
-        nlive                   = int(config.get("run_params", "nlive", fallback=800))
+    if params['forecast_model']:
+        nlive = int(config.get("run_params", "nlive", fallback=800))
         params['sample_method'] = str(config.get("run_params", "sample_method", fallback='rwalk'))
-    # nessai
-    elif params['sampler'] == 'nessai':
-        from blip.src.nessai_engine import nessai_engine
-        nlive                        = int(config.get("run_params", "nlive", fallback=2000))
-        ## flow tuning
-        params['nessai_neurons']     = str(config.get("run_params", "nessai_neurons", fallback='scale_greedy'))
-        if params['nessai_neurons']=='manual':
-            params['n_neurons']      = int(config.get("run_params", "n_neurons", fallback=20))
-        params['reset_flow']         = int(config.get("run_params", "reset_flow", fallback=16))
-    ## emcee
-    elif params['sampler'] == 'emcee':
-        from blip.src.emcee_engine import emcee_engine
-        params['Nburn'] = int(config.get("run_params", "Nburn",fallback=1000))
-        params['Nsamples'] = int(config.get("run_params", "Nsamples",fallback=1000))
+        params['checkpoint'] = 0
+        params['checkpoint_interval'] = 0
+        params['Nburn'] = int(config.get("run_params", "Nburn", fallback=1000))
+        params['Nsamples'] = int(config.get("run_params", "Nsamples", fallback=1000))
     else:
-        raise ValueError("Unknown sampler. Can be 'dynesty', 'emcee', or 'nessai' for now.")
-    # checkpointing (dynesty+nessai only for now)
-    if params['sampler']=='dynesty' or params['sampler'] == 'nessai':
-        params['checkpoint']            = int(config.get("run_params", "checkpoint", fallback=0))
-        params['checkpoint_interval']   = float(config.get("run_params", "checkpoint_interval", fallback=3600))
+        ## dynesty
+        if params['sampler'] == 'dynesty':
+            from blip.src.dynesty_engine import dynesty_engine
+            nlive                   = int(config.get("run_params", "nlive", fallback=800))
+            params['sample_method'] = str(config.get("run_params", "sample_method", fallback='rwalk'))
+        # nessai
+        elif params['sampler'] == 'nessai':
+            from blip.src.nessai_engine import nessai_engine
+            nlive                        = int(config.get("run_params", "nlive", fallback=2000))
+            ## flow tuning
+            params['nessai_neurons']     = str(config.get("run_params", "nessai_neurons", fallback='scale_greedy'))
+            if params['nessai_neurons']=='manual':
+                params['n_neurons']      = int(config.get("run_params", "n_neurons", fallback=20))
+            params['reset_flow']         = int(config.get("run_params", "reset_flow", fallback=16))
+        ## emcee
+        elif params['sampler'] == 'emcee':
+            from blip.src.emcee_engine import emcee_engine
+            params['Nburn'] = int(config.get("run_params", "Nburn",fallback=1000))
+            params['Nsamples'] = int(config.get("run_params", "Nsamples",fallback=1000))
+        else:
+            raise ValueError("Unknown sampler. Can be 'dynesty', 'emcee', or 'nessai' for now.")
+        # checkpointing (dynesty+nessai only for now)
+        if params['sampler']=='dynesty' or params['sampler'] == 'nessai':
+            params['checkpoint']            = int(config.get("run_params", "checkpoint", fallback=0))
+            params['checkpoint_interval']   = float(config.get("run_params", "checkpoint_interval", fallback=3600))
 
     # Fix random seed
     if params['FixSeed']:
@@ -508,30 +556,50 @@ def blip(paramsfile='params.ini',resume=False):
     
         # Copy the params file to outdir, to keep track of the parameters of each run.
         subprocess.call(["cp", paramsfile, params['out_dir']])
-        
+
         # Initialize lisa class
-        lisa =  LISA(params, inj)
-        
-        ## save the Model and Injection as needed
-        ## the Model tends to be more lightweight
-        with open(params['out_dir'] + '/model.pickle', 'wb') as outfile:
-            pickle.dump(lisa.Model, outfile)
-        ## but the Injection is massive, so discard the responses we no longer need
-        ## saving & discarding now, as opposed to at the end of the run also saves space in the dynesty/nessai checkpoint files.
-        if not params['load_data']:
-            for cmn in lisa.Injection.component_names:
-                if hasattr(lisa.Injection.components[cmn],'response_mat'):
-                    del lisa.Injection.components[cmn].response_mat
-                if hasattr(lisa.Injection.components[cmn],'summ_response_mat'):
-                    del lisa.Injection.components[cmn].summ_response_mat
-                if hasattr(lisa.Injection.components[cmn],'inj_response_mat'):
-                    del lisa.Injection.components[cmn].inj_response_mat
+        if params['forecast_model']:
+            from blip.src.multipole_forecast import MultipoleForecastRun
+
+            lisa = MultipoleForecastRun(params, inj)
+            lisa.write_sensitivity_products(params['out_dir'])
+            with open(params['out_dir'] + '/model.pickle', 'wb') as outfile:
+                pickle.dump(lisa.Model, outfile)
             with open(params['out_dir'] + '/injection.pickle', 'wb') as outfile:
                 pickle.dump(lisa.Injection, outfile)
+        else:
+            lisa =  LISA(params, inj)
+            
+            ## save the Model and Injection as needed
+            ## the Model tends to be more lightweight
+            with open(params['out_dir'] + '/model.pickle', 'wb') as outfile:
+                pickle.dump(lisa.Model, outfile)
+            ## but the Injection is massive, so discard the responses we no longer need
+            ## saving & discarding now, as opposed to at the end of the run also saves space in the dynesty/nessai checkpoint files.
+            if not params['load_data']:
+                for cmn in lisa.Injection.component_names:
+                    if hasattr(lisa.Injection.components[cmn],'response_mat'):
+                        del lisa.Injection.components[cmn].response_mat
+                    if hasattr(lisa.Injection.components[cmn],'summ_response_mat'):
+                        del lisa.Injection.components[cmn].summ_response_mat
+                    if hasattr(lisa.Injection.components[cmn],'inj_response_mat'):
+                        del lisa.Injection.components[cmn].inj_response_mat
+                with open(params['out_dir'] + '/injection.pickle', 'wb') as outfile:
+                    pickle.dump(lisa.Injection, outfile)
     else:
+        if params['forecast_model']:
+            raise TypeError("Resuming is not supported for the powerlaw_single_multipole forecast model.")
         print("Resuming a previous analysis. Reloading data and sampler state...")
 
-    if params['sampler'] == 'dynesty':
+    if params['forecast_model']:
+        print("Using exact 2D grid posterior for {}. The sampler setting '{}' is ignored for this model.".format(FORECAST_MODEL_NAME, params['sampler']))
+        parameters = lisa.Model.parameters
+        lisa.run_grid_posterior(
+            params['out_dir'],
+            grid_size=params['posterior_grid_size'],
+            posterior_samples=params['posterior_samples'],
+        )
+    elif params['sampler'] == 'dynesty':
         # Create engine
         if not resume:
             # multiprocessing
@@ -629,21 +697,24 @@ def blip(paramsfile='params.ini',resume=False):
         pickle.dump(parameters, outfile)
 
 
-    print("\nMaking posterior Plots ...")
-    if not params['load_data']:
-        plotmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
-    else:
-        plotmaker(post_samples, params, parameters, inj, lisa.Model)
-    if not params['load_data']:
-        fitmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
-    else:
-        fitmaker(post_samples, params, parameters, inj, lisa.Model)
-    ## make a map if there is a map to be made
-    if np.any([lisa.Model.submodels[sm_name].has_map for sm_name in lisa.Model.submodel_names]):
-        if 'healpy_proj' in params.keys():
-            mapmaker(post_samples, params, parameters, lisa.Model,  coord=params['healpy_proj'])
+    if not params['forecast_model']:
+        from blip.tools.plotmaker import plotmaker, mapmaker, fitmaker
+
+        print("\nMaking posterior Plots ...")
+        if not params['load_data']:
+            plotmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
         else:
-            mapmaker(post_samples, params, parameters, lisa.Model)
+            plotmaker(post_samples, params, parameters, inj, lisa.Model)
+        if not params['load_data']:
+            fitmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
+        else:
+            fitmaker(post_samples, params, parameters, inj, lisa.Model)
+        ## make a map if there is a map to be made
+        if np.any([lisa.Model.submodels[sm_name].has_map for sm_name in lisa.Model.submodel_names]):
+            if 'healpy_proj' in params.keys():
+                mapmaker(post_samples, params, parameters, lisa.Model,  coord=params['healpy_proj'])
+            else:
+                mapmaker(post_samples, params, parameters, lisa.Model)
         
     
 

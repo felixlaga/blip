@@ -1,7 +1,11 @@
 import numpy as np
 import numpy.linalg as LA
+import importlib
 #from scipy.special import lpmn, sph_harm
-import healpy as hp
+from blip.src.healpy_compat import ensure_healpy_compat
+
+ensure_healpy_compat()
+hppix = importlib.import_module("healpy.pixelfunc")
 from blip.src.sph_geometry import sph_geometry
 
 class geometry(sph_geometry):
@@ -384,19 +388,19 @@ class geometry(sph_geometry):
 
         '''
 
-        npix = hp.nside2npix(self.params['nside'])
+        npix = hppix.nside2npix(self.params['nside'])
 
         # Array of pixel indices
         pix_idx  = np.arange(npix)
 
         # Angular coordinates of pixel indices
-        theta, phi = hp.pix2ang(self.params['nside'], pix_idx)
+        theta, phi = hppix.pix2ang(self.params['nside'], pix_idx)
 
         # Take cosine.
         ctheta = np.cos(theta)
 
         # Area of each pixel in sq.radians
-        dOmega = hp.pixelfunc.nside2pixarea(self.params['nside'])
+        dOmega = hppix.nside2pixarea(self.params['nside'])
 
         # Create 2D array of (x,y,z) unit vectors for every sky direction.
         omegahat = np.array([np.sqrt(1-ctheta**2)*np.cos(phi),np.sqrt(1-ctheta**2)*np.sin(phi),ctheta])
@@ -617,13 +621,13 @@ class geometry(sph_geometry):
 #        pix_idx  = np.arange(npix)
 
         # Angular coordinates of pixel indices
-        theta, phi = hp.pix2ang(self.params['nside'], pix_idx)
+        theta, phi = hppix.pix2ang(self.params['nside'], pix_idx)
 
         # Take cosine.
         ctheta = np.cos(theta)
 
         # Area of each pixel in sq.radians
-        dOmega = hp.pixelfunc.nside2pixarea(self.params['nside'])
+        dOmega = hppix.nside2pixarea(self.params['nside'])
 
         # Create 2D array of (x,y,z) unit vectors for every sky direction.
         omegahat = np.array([np.sqrt(1-ctheta**2)*np.cos(phi),np.sqrt(1-ctheta**2)*np.sin(phi),ctheta])

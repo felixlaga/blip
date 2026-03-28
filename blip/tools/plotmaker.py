@@ -4,10 +4,15 @@ import numpy as np
 import matplotlib
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import pandas as pd
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerTuple
 from chainconsumer import ChainConsumer
+try:
+    from chainconsumer import Chain, PlotConfig, Truth
+except ImportError:
+    Chain = PlotConfig = Truth = None
 import healpy as hp
 from healpy import Alm
 from astropy import units as u
@@ -494,18 +499,61 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         
     ## Make chainconsumer corner plots
     cc = ChainConsumer()
-    cc.add_chain(post, parameters=all_parameters)
-    cc.configure(smooth=False, kde=False, max_ticks=2, sigmas=np.array([1, 2]), label_font_size=18, tick_font_size=18, \
-            summary=False, statistics="max_central", spacing=2, summary_area=0.95, cloud=False, bins=1.2)
-    cc.configure_truth(color='g', ls='--', alpha=0.7)
+    legacy_chainconsumer = hasattr(cc, "configure")
+    chain_name = "posterior"
 
-    if knowTrue:
-        fig = cc.plotter.plot(figsize=(16, 16), truth=truevals)
+    if legacy_chainconsumer:
+        cc.add_chain(post, parameters=all_parameters)
+        cc.configure(
+            smooth=False,
+            kde=False,
+            max_ticks=2,
+            sigmas=np.array([1, 2]),
+            label_font_size=18,
+            tick_font_size=18,
+            summary=False,
+            statistics="max_central",
+            spacing=2,
+            summary_area=0.95,
+            cloud=False,
+            bins=1.2,
+        )
+        cc.configure_truth(color='g', ls='--', alpha=0.7)
+
+        if knowTrue:
+            fig = cc.plotter.plot(figsize=(16, 16), truth=truevals)
+        else:
+            fig = cc.plotter.plot(figsize=(16, 16))
     else:
+        post_df = pd.DataFrame(np.atleast_2d(post), columns=all_parameters)
+        cc.add_chain(
+            Chain(
+                samples=post_df,
+                name=chain_name,
+                sigmas=[1, 2],
+                smooth=None,
+                kde=False,
+                plot_cloud=False,
+            )
+        )
+        cc.set_plot_config(
+            PlotConfig(
+                max_ticks=2,
+                label_font_size=18,
+                tick_font_size=18,
+                spacing=2,
+                summarise=False,
+            )
+        )
+        if knowTrue:
+            cc.add_truth(Truth(location=truevals, color='g', line_style='--', alpha=0.7))
+
         fig = cc.plotter.plot(figsize=(16, 16))
 
     ## make axis labels to be parameter summaries
     sum_data = cc.analysis.get_summary()
+    if chain_name in sum_data:
+        sum_data = sum_data[chain_name]
     axes = np.array(fig.axes).reshape((npar, npar))
 
     # Adjust axis labels
@@ -514,17 +562,25 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
 
         # get the right summary for the parameter ii
         sum_ax = sum_data[all_parameters[ii]]
-        err =  [sum_ax[2] - sum_ax[1], sum_ax[1]- sum_ax[0]]
+        if hasattr(sum_ax, 'lower') and hasattr(sum_ax, 'center') and hasattr(sum_ax, 'upper'):
+            lower, center, upper = sum_ax.lower, sum_ax.center, sum_ax.upper
+        else:
+            lower, center, upper = sum_ax[0], sum_ax[1], sum_ax[2]
 
-        if np.abs(sum_ax[1]) <= 1e-3:
-            mean_def = '{0:.3e}'.format(sum_ax[1])
+        if lower is None or upper is None:
+            err = [0.0, 0.0]
+        else:
+            err = [upper - center, center - lower]
+
+        if np.abs(center) <= 1e-3:
+            mean_def = '{0:.3e}'.format(center)
             eidx = mean_def.find('e')
             base = float(mean_def[0:eidx])
             exponent = int(mean_def[eidx+1:])
             mean_form = str(base)
             exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
         else:
-            mean_form = '{0:.3f}'.format(sum_ax[1])
+            mean_form = '{0:.3f}'.format(center)
             exp_form = ''
 
         if np.abs(err[0]) <= 1e-2:
@@ -552,7 +608,10 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
     
     if not params['load_data']:    
         # plot walkers
-        fig = cc.plotter.plot_walks(truth=truevals, convolve=10)
+        if legacy_chainconsumer:
+            fig = cc.plotter.plot_walks(truth=truevals, convolve=10)
+        else:
+            fig = cc.plotter.plot_walks(convolve=10)
         plt.savefig(params['out_dir'] + 'plotwalks.png', dpi=200)
         plt.close()
 
@@ -601,4 +660,3 @@ if __name__ == '__main__':
             mapmaker(post, params, parameters, Model, coord=params['healpy_proj'])
         else:
             mapmaker(post, params, parameters, Model)
-

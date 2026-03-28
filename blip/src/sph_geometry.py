@@ -1,7 +1,11 @@
 import numpy as np
 from scipy.special import sph_harm
 import numpy.linalg as LA
-import healpy as hp
+import importlib
+from blip.src.healpy_compat import ensure_healpy_compat
+
+ensure_healpy_compat()
+hppix = importlib.import_module("healpy.pixelfunc")
 from blip.src.clebschGordan import clebschGordan
 
 class sph_geometry(clebschGordan):
@@ -50,19 +54,19 @@ class sph_geometry(clebschGordan):
         ## array size of almax
         alm_size = (almax + 1)**2
 
-        npix = hp.nside2npix(self.params['nside'])
+        npix = hppix.nside2npix(self.params['nside'])
 
         # Array of pixel indices
         pix_idx  = np.arange(npix)
 
         #Angular coordinates of pixel indcides
-        theta, phi = hp.pix2ang(self.params['nside'], pix_idx)
+        theta, phi = hppix.pix2ang(self.params['nside'], pix_idx)
 
         # Take cosine.
         ctheta = np.cos(theta)
 
         # Area of each pixel in sq.radians
-        dOmega = hp.pixelfunc.nside2pixarea(self.params['nside'])
+        dOmega = hppix.nside2pixarea(self.params['nside'])
 
         # Create 2D array of (x,y,z) unit vectors for every sky direction.
         omegahat = np.array([np.sqrt(1-ctheta**2)*np.cos(phi),np.sqrt(1-ctheta**2)*np.sin(phi),ctheta])
@@ -281,5 +285,3 @@ class sph_geometry(clebschGordan):
                                     [np.conj(RAT), np.conj(RET), RTT] ])
 
         return aet_response_mat
-
-
