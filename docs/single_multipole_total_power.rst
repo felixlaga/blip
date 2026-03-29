@@ -64,3 +64,39 @@ and
 ``multipole_sweep_summary.png``
 
 to summarize the evidences and recovered amplitudes across the tested multipoles.
+
+
+Relative Multi-L Recovery
+-------------------------
+
+BLIP also supports a shared-spectrum recovery model that keeps the monopole
+normalization in ``log10(Omega_0)`` and samples one non-negative relative
+amplitude per multipole,
+
+``model=noise+powerlaw_multipoles``
+
+with
+
+``log10(A_L / A_0)``
+
+sampled for every ``L = 1..lmax``.
+
+The covariance is built as
+
+``C_gw = S_gw(f; alpha, log10 Omega_0) [R_iso + sum_L (A_L/A_0) R^(L)]``
+
+where each ``R^(L)`` is the effective total-power response for that multipole
+after marginalizing over its ``m`` modes.
+
+This recovery model is intended to be paired with an injected anisotropic sky,
+for example
+
+``injection=noise+powerlaw_sph``
+
+with chosen ``blms``. The example config
+
+``params_relative_multipoles_l10.ini``
+
+recovers ``L=1..10`` against a ``powerlaw_sph`` injection and writes
+``*_summary.txt``, ``*_ranking.txt``, and ``*_summary.png`` files that rank
+which multipoles are recovered most cleanly.

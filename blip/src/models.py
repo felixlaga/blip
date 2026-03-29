@@ -270,14 +270,15 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.prior = self.sph_prior
                 self.cov = self.compute_cov_asgwb
             else:
+                inj_blms = np.asarray(self.injvals['blms'])
                 ## get blm truevals
-                val_list = self.blms_2_blm_params(inj['blms'])
+                val_list = self.blms_2_blm_params(inj_blms)
                 
                 for param, val in zip(blm_parameters,val_list):
                     self.truevals[param] = val
                 
                 ## get alms
-                self.alms_inj = self.compute_skymap_alms(inj['blms'])
+                self.alms_inj = self.compute_skymap_alms_from_blms(inj_blms)
                 ## get sph basis skymap
                 self.sph_skymap =  hp.alm2map(self.alms_inj[0:hp.Alm.getsize(self.almax)],self.params['nside'])
                 ## get response integrated over the Ylms
@@ -316,6 +317,48 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.cov = self.compute_cov_isgwb
             else:
                 self.inj_response_mat = self.response_mat
+        
+        ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
+        ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
+        elif self.spatial_model_name == 'multipoles':
+            if injection:
+                raise ValueError("The relative multipole-spectrum model is analysis-only. Use a spherical-harmonic injection (e.g. powerlaw_sph with chosen blms) instead.")
+            
+            self.multipole_lmax = int(self.params['lmax'])
+            if self.multipole_lmax < 1:
+                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
+            
+            self.relative_multipole_ls = list(range(1, self.multipole_lmax + 1))
+            self.relative_multipole_start = len(self.spectral_parameters)
+            self.spatial_parameters = self.spatial_parameters + [
+                self.get_relative_multipole_amplitude_parameter(lval) for lval in self.relative_multipole_ls
+            ]
+            
+            if self.params['tdi_lev'] == 'michelson':
+                self.isotropic_response = self.isgwb_mich_response
+                self.anisotropic_response = self.asgwb_mich_response
+            elif self.params['tdi_lev'] == 'xyz':
+                self.isotropic_response = self.isgwb_xyz_response
+                self.anisotropic_response = self.asgwb_xyz_response
+            elif self.params['tdi_lev'] == 'aet':
+                self.isotropic_response = self.isgwb_aet_response
+                self.anisotropic_response = self.asgwb_aet_response
+            else:
+                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
+            
+            self.response_mat, self.relative_response_mats = self.compute_multipole_response_bank(
+                f0,
+                tsegmid,
+                self.multipole_lmax,
+            )
+            
+            self.fancyname = "Relative Multipoles $L\\leq{}$ ".format(self.multipole_lmax) + self.fancyname
+            self.subscript = "_{\\mathrm{L\\leq" + str(self.multipole_lmax) + "}}"
+            self.color = 'royalblue'
+            self.has_map = False
+            
+            self.prior = self.multipoles_prior
+            self.cov = self.compute_cov_multipoles
         
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
@@ -580,6 +623,12 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         return [(multipole_l, mval) for mval in range(-multipole_l, multipole_l + 1)]
     
+    def get_relative_multipole_amplitude_parameter(self,multipole_l):
+        '''
+        Parameter label for a relative multipole amplitude A_L / A_0.
+        '''
+        return r'$\log_{10} (A_{' + str(multipole_l) + '}/A_0)$'
+    
     def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
         '''
         Build a statistically isotropic covariance response for the total power in one fixed multipole L.
@@ -601,6 +650,50 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         effective_response_sq = 0.5 * (effective_response_sq + np.swapaxes(np.conj(effective_response_sq), 0, 1))
         
         return effective_response_sq
+    
+    def compute_multipole_response_bank(self,f0,tsegmid,multipole_lmax):
+        '''
+        Build the isotropic response plus one effective total-power response for each multipole L=1..multipole_lmax.
+        '''
+        isotropic_response_mat = self.isotropic_response(f0,tsegmid)
+        multipole_responses = []
+        for multipole_l in range(1, multipole_lmax + 1):
+            response_basis = self.anisotropic_response(
+                f0,
+                tsegmid,
+                set_almax=multipole_l,
+                set_lm_pairs=self.get_single_multipole_lm_pairs(multipole_l),
+            )
+            multipole_responses.append(
+                self.compute_single_multipole_response(response_basis,multipole_l,basis_already_selected=True)
+            )
+        return isotropic_response_mat, np.stack(multipole_responses, axis=-1)
+    
+    def compute_relative_multipole_response(self,log10_relative_amplitudes):
+        '''
+        Combine the isotropic response with the effective relative multipole responses.
+        '''
+        log10_relative_amplitudes = np.asarray(log10_relative_amplitudes,dtype=float)
+        if log10_relative_amplitudes.shape != (len(self.relative_multipole_ls),):
+            raise ValueError(
+                "Expected {} relative multipole amplitudes, got {}.".format(
+                    len(self.relative_multipole_ls),
+                    log10_relative_amplitudes.size,
+                )
+            )
+        
+        combined_response_mat = np.array(self.response_mat, copy=True)
+        relative_weights = 10**log10_relative_amplitudes
+        combined_response_mat = combined_response_mat + np.tensordot(
+            self.relative_response_mats,
+            relative_weights,
+            axes=([4],[0]),
+        )
+        combined_response_mat = 0.5 * (
+            combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
+        )
+        
+        return combined_response_mat
     
     #############################
     ##          Priors         ##
@@ -673,6 +766,17 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                     cnt = cnt + 2
 
         return spectral_theta+sph_theta
+    
+    def multipoles_prior(self,theta):
+        '''
+        Prior transform for the relative multipole-spectrum model.
+        '''
+        spectral_theta = self.spectral_prior(theta[:self.relative_multipole_start])
+        spatial_theta = [
+            self.rescale_uniform_prior(unit_theta,'log_A_ratio',[-6,6])
+            for unit_theta in theta[self.relative_multipole_start:]
+        ]
+        return spectral_theta + spatial_theta
     
     def hierarchical_prior(self,theta):
         '''
@@ -882,12 +986,20 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         ## Signal PSD
         Sgw = self.compute_Sgw(self.fs,theta[:self.blm_start])
         
-        ## get skymap and integrate over alms
-        summ_response_mat = self.compute_summed_response(self.compute_skymap_alms(theta[self.blm_start:]))
-
         ## The noise spectrum of the GW signal. Written down here as a full
         ## covariance matrix axross all the channels.
-        cov_sgwb = Sgw[None, None, :, None]*summ_response_mat
+        cov_sgwb = Sgw[None, None, :, None]*self.compute_response_matrix(theta)
+        
+        return cov_sgwb
+    
+    def compute_cov_multipoles(self,theta):
+        '''
+        Compute the covariance from the shared-spectrum, relative-multipole model.
+        '''
+        spectral_theta = theta[:self.relative_multipole_start]
+        spatial_theta = theta[self.relative_multipole_start:]
+        Sgw = self.compute_Sgw(self.fs,spectral_theta)
+        cov_sgwb = Sgw[None, None, :, None] * self.compute_relative_multipole_response(spatial_theta)
         
         return cov_sgwb
 
@@ -916,6 +1028,20 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         ## normalize and return
         return alm_vals/(alm_vals[0] * np.sqrt(4*np.pi))
     
+    def compute_skymap_alms_from_blms(self,blms):
+        '''
+        Function to compute the anisotropic skymap a_lms directly from complex b_lm coefficients.
+        '''
+        blm_vals = np.asarray(blms,dtype='complex')
+        if blm_vals.size != self.blm_size:
+            raise ValueError("Input blm array has size {}, expected {} for lmax={}.".format(
+                blm_vals.size,
+                self.blm_size,
+                self.blmax,
+            ))
+        alm_vals = self.blm_2_alm(blm_vals)
+        return alm_vals/(alm_vals[0] * np.sqrt(4*np.pi))
+    
     def compute_summed_response(self,alms):
         '''
         Function to compute the integrated, skymap-convolved anisotropic response
@@ -930,6 +1056,40 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         '''
         return np.einsum('ijklm,m', self.response_mat, alms)
+    
+    def compute_response_matrix(self,theta):
+        '''
+        Return the detector response matrix implied by a parameter draw.
+        '''
+        if self.spatial_model_name == 'sph':
+            return self.compute_summed_response(self.compute_skymap_alms(theta[self.blm_start:]))
+        if self.spatial_model_name == 'multipoles':
+            return self.compute_relative_multipole_response(theta[self.relative_multipole_start:])
+        return self.response_mat
+    
+    def compute_angular_power_spectrum(self,alms,lmax=None,relative_to_l0=False):
+        '''
+        Compute the multipole power spectrum A_L = (2L+1)^(-1) sum_M |a_LM|^2 from the full power-map alm array.
+        '''
+        alms = np.asarray(alms)
+        if lmax is None:
+            lmax = int(np.sqrt(alms.size) - 1)
+        if (lmax + 1)**2 > alms.size:
+            raise ValueError("Requested lmax={} exceeds the supplied alm array.".format(lmax))
+        
+        powers = np.zeros(lmax + 1)
+        for idx, alm_val in enumerate(alms[:(lmax + 1)**2]):
+            lval, _ = self.idxtoalm(lmax, idx)
+            powers[lval] += np.abs(alm_val)**2
+        for lval in range(lmax + 1):
+            powers[lval] = powers[lval] / (2*lval + 1)
+        
+        if relative_to_l0:
+            if powers[0] <= 0:
+                raise ValueError("Cannot normalize multipole powers by a non-positive monopole.")
+            powers = powers / powers[0]
+        
+        return powers
     
     def process_astro_skymap(self,skymap):
         '''
@@ -1006,6 +1166,11 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             print("Attempted to recompute response matrix, but there is already an attached response matrix at these times and frequencies. Returning the original...")
             return self.response_mat
         else:
+            if self.spatial_model_name == 'multipoles':
+                raise NotImplementedError(
+                    "The multipole-spectrum model stores both isotropic and per-L effective responses. "
+                    "Recompute those via compute_multipole_response_bank(...) and combine them with compute_relative_multipole_response(...)."
+                )
             response_mat = self.response(f0,tsegmid,**self.response_kwargs)
             if self.spatial_model_name == 'multipole':
                 basis_already_selected = 'set_lm_pairs' in self.response_kwargs

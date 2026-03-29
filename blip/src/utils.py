@@ -56,6 +56,7 @@ def gen_suffixes(names):
                  'isgwb':{'abbrv':'I','count':1},
                  'sph':{'abbrv':'A','count':1},
                  'multipole':{'abbrv':'L','count':1},
+                 'multipoles':{'abbrv':'M','count':1},
                  'population':{'abbrv':'P','count':1},
                  'hierarchical':{'abbrv':'H','count':1} }
     
@@ -134,16 +135,23 @@ def ensure_color_matching(Model,Injection):
     
     '''
     
-    ## find matches
-    matching_keys = [key for key in Injection.component_names if key in Model.submodel_names]
+    ## find exact and aliased matches
+    matching_pairs = []
+    for model_key in Model.submodel_names:
+        if model_key in Injection.component_names:
+            matching_pairs.append((model_key, model_key))
+            continue
+        model_alias = getattr(Model.submodels[model_key], 'alias', None)
+        if model_alias in Injection.component_names:
+            matching_pairs.append((model_key, model_alias))
     
     ## ensure color matching
-    for key in matching_keys:
-        if Injection.components[key].color != Model.submodels[key].color:
-            Injection.components[key].color = Model.submodels[key].color
+    for model_key, injection_key in matching_pairs:
+        if Injection.components[injection_key].color != Model.submodels[model_key].color:
+            Injection.components[injection_key].color = Model.submodels[model_key].color
     
     ## reassign unmatched color duplicates as needed
-    catch_color_duplicates(Injection,sacred_labels=matching_keys)
+    catch_color_duplicates(Injection,sacred_labels=[injection_key for _, injection_key in matching_pairs])
     
     return
 

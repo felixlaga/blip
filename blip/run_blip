@@ -35,7 +35,7 @@ def format_prior_bounds_summary(prior_bounds):
     Format a compact one-line summary of parsed prior intervals.
     '''
     ordered_keys = ['log_Np','log_Na','alpha','log_A_L','log_omega0',
-                    'alpha1','alpha2','log_fbreak','log_fcut','log_fscale']
+                    'log_A_ratio','alpha1','alpha2','log_fbreak','log_fcut','log_fscale']
     parts = []
     for key in ordered_keys:
         if key in prior_bounds:
@@ -184,6 +184,194 @@ def write_multipole_sweep_summary(out_dir, summary_rows):
     plt.tight_layout()
     fig.savefig(out_dir + '/multipole_sweep_summary.png', dpi=200)
     plt.close(fig)
+
+
+def get_matching_injection_component(model_submodel, injection):
+    '''
+    Return the injection component associated with a recovery submodel, respecting aliases.
+    '''
+    if injection is None:
+        return None
+    if model_submodel.name in injection.components:
+        return injection.components[model_submodel.name]
+    model_alias = getattr(model_submodel, 'alias', None)
+    if model_alias in injection.components:
+        return injection.components[model_alias]
+    return None
+
+
+def extract_relative_multipole_truths(multipoles_submodel, injection_component):
+    '''
+    Convert a matching injected anisotropic sky into relative total powers A_L / A_0.
+    '''
+    if injection_component is None or not hasattr(injection_component, 'alms_inj'):
+        return None
+    available_lmax = int(np.sqrt(injection_component.alms_inj.size) - 1)
+    truth_lmax = min(multipoles_submodel.multipole_lmax, available_lmax)
+    relative_powers = injection_component.compute_angular_power_spectrum(
+        injection_component.alms_inj,
+        lmax=truth_lmax,
+        relative_to_l0=True,
+    )
+    truths = np.full(multipoles_submodel.multipole_lmax + 1, np.nan)
+    truths[:truth_lmax + 1] = relative_powers
+    return truths
+
+
+def summarize_multipoles_recovery(model, samples, injection=None):
+    '''
+    Summarize posterior constraints for the relative multipole-spectrum recovery model.
+    '''
+    parameter_lookup = {name: idx for idx, name in enumerate(model.parameters['all'])}
+    summary_payload = {}
+
+    for submodel_name in model.submodel_names:
+        sm = model.submodels[submodel_name]
+        if getattr(sm, 'spatial_model_name', None) != 'multipoles':
+            continue
+
+        injection_component = get_matching_injection_component(sm, injection)
+        truth_ratios = extract_relative_multipole_truths(sm, injection_component)
+
+        row_payloads = []
+        for multipole_l in sm.relative_multipole_ls:
+            parameter_name = sm.get_relative_multipole_amplitude_parameter(multipole_l)
+            q025, median, q975 = summarize_parameter(samples, parameter_lookup[parameter_name])
+            width = q975 - q025
+
+            truth_ratio = np.nan
+            truth_log_ratio = np.nan
+            recovery_score = np.nan
+            if truth_ratios is not None and multipole_l < truth_ratios.size:
+                truth_ratio = truth_ratios[multipole_l]
+                if np.isfinite(truth_ratio) and truth_ratio > 0:
+                    truth_log_ratio = float(np.log10(truth_ratio))
+                    recovery_score = np.abs(median - truth_log_ratio) / max(0.5 * width, 1e-12)
+
+            row_payloads.append({
+                'multipole_l': multipole_l,
+                'q025_log_A_ratio': q025,
+                'median_log_A_ratio': median,
+                'q975_log_A_ratio': q975,
+                'q025_A_ratio': float(10**q025),
+                'median_A_ratio': float(10**median),
+                'q975_A_ratio': float(10**q975),
+                'truth_A_ratio': truth_ratio,
+                'truth_log_A_ratio': truth_log_ratio,
+                'ci_width_log_A_ratio': width,
+                'recovery_score': recovery_score,
+            })
+
+        summary_payload[submodel_name] = {
+            'submodel_name': submodel_name,
+            'fancyname': sm.fancyname,
+            'matching_injection': None if injection_component is None else injection_component.name,
+            'rows': row_payloads,
+        }
+
+    return summary_payload
+
+
+def write_multipoles_recovery_summary(out_dir, summary_payload):
+    '''
+    Save per-L posterior summaries and a compact ranking plot for the relative multipole-spectrum model.
+    '''
+    if len(summary_payload) == 0:
+        return
+
+    for submodel_name, payload in summary_payload.items():
+        rows = payload['rows']
+        if len(rows) == 0:
+            continue
+
+        stem = submodel_name.replace('/', '_')
+        summary_path = os.path.join(out_dir, stem + '_summary.txt')
+        ranking_path = os.path.join(out_dir, stem + '_ranking.txt')
+        plot_path = os.path.join(out_dir, stem + '_summary.png')
+
+        header = (
+            "multipole_l q025_log_A_ratio median_log_A_ratio q975_log_A_ratio "
+            "q025_A_ratio median_A_ratio q975_A_ratio truth_log_A_ratio truth_A_ratio "
+            "ci_width_log_A_ratio recovery_score"
+        )
+        table = []
+        for row in rows:
+            table.append([
+                row['multipole_l'],
+                row['q025_log_A_ratio'],
+                row['median_log_A_ratio'],
+                row['q975_log_A_ratio'],
+                row['q025_A_ratio'],
+                row['median_A_ratio'],
+                row['q975_A_ratio'],
+                row['truth_log_A_ratio'],
+                row['truth_A_ratio'],
+                row['ci_width_log_A_ratio'],
+                row['recovery_score'],
+            ])
+        np.savetxt(summary_path, np.asarray(table, dtype=float), header=header)
+
+        finite_scores = [row for row in rows if np.isfinite(row['recovery_score'])]
+        if len(finite_scores) > 0:
+            ranked_rows = sorted(finite_scores, key=lambda row: row['recovery_score'])
+            ranking_metric = 'recovery_score'
+            ranking_description = 'smaller recovery_score is better'
+        else:
+            ranked_rows = sorted(rows, key=lambda row: row['ci_width_log_A_ratio'])
+            ranking_metric = 'ci_width_log_A_ratio'
+            ranking_description = 'smaller ci_width_log_A_ratio is better'
+
+        with open(ranking_path, 'w') as outfile:
+            outfile.write("# {}\n".format(payload['fancyname']))
+            if payload['matching_injection'] is not None:
+                outfile.write("# matched_injection={}\n".format(payload['matching_injection']))
+            outfile.write("# ranking_metric={}\n".format(ranking_metric))
+            outfile.write("# {}\n".format(ranking_description))
+            outfile.write("rank multipole_l median_log_A_ratio q025_log_A_ratio q975_log_A_ratio truth_log_A_ratio {}\n".format(ranking_metric))
+            for rank, row in enumerate(ranked_rows, start=1):
+                outfile.write(
+                    "{} {} {:.6e} {:.6e} {:.6e} {:.6e} {:.6e}\n".format(
+                        rank,
+                        row['multipole_l'],
+                        row['median_log_A_ratio'],
+                        row['q025_log_A_ratio'],
+                        row['q975_log_A_ratio'],
+                        row['truth_log_A_ratio'],
+                        row[ranking_metric],
+                    )
+                )
+
+        multipoles = [row['multipole_l'] for row in rows]
+        medians = [row['median_log_A_ratio'] for row in rows]
+        q025 = [row['q025_log_A_ratio'] for row in rows]
+        q975 = [row['q975_log_A_ratio'] for row in rows]
+        err_low = np.asarray(medians) - np.asarray(q025)
+        err_high = np.asarray(q975) - np.asarray(medians)
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+        axes[0].errorbar(multipoles, medians, yerr=[err_low, err_high], marker='o', color='royalblue', lw=1.5, capsize=3)
+        truth_logs = np.asarray([row['truth_log_A_ratio'] for row in rows], dtype=float)
+        truth_mask = np.isfinite(truth_logs)
+        if np.any(truth_mask):
+            axes[0].scatter(np.asarray(multipoles)[truth_mask], truth_logs[truth_mask], marker='x', color='darkorange', s=45, label='Injected')
+            axes[0].legend(loc='best')
+        axes[0].set_xlabel('Multipole L')
+        axes[0].set_ylabel(r'$\log_{10}(A_L/A_0)$')
+        axes[0].set_title('Recovered Relative Multipole Power')
+
+        metric_values = np.asarray([row[ranking_metric] for row in rows], dtype=float)
+        metric_mask = np.isfinite(metric_values)
+        axes[1].plot(np.asarray(multipoles)[metric_mask], metric_values[metric_mask], marker='o', color='slateblue')
+        if len(ranked_rows) > 0:
+            best_row = ranked_rows[0]
+            axes[1].axvline(best_row['multipole_l'], color='0.6', ls='--', lw=1)
+        axes[1].set_xlabel('Multipole L')
+        axes[1].set_ylabel(ranking_metric)
+        axes[1].set_title('Best-Recovered Ranking')
+
+        plt.tight_layout()
+        fig.savefig(plot_path, dpi=200)
+        plt.close(fig)
 
 class LISA(LISAdata, Model):
 
@@ -690,6 +878,7 @@ def blip(paramsfile='params.ini',resume=False):
                               'alpha':parse_prior_bounds(config,'alpha',[-5,5]),
                               'log_omega0':parse_prior_bounds(config,'log_omega0',[-14,8]),
                               'log_A_L':parse_prior_bounds(config,'log_A_L',[-14,8]),
+                              'log_A_ratio':parse_prior_bounds(config,'log_A_ratio',[-6,6]),
                               'alpha1':parse_prior_bounds(config,'alpha1',[-4,6]),
                               'alpha2':parse_prior_bounds(config,'alpha2',[0,40]),
                               'log_fbreak':parse_prior_bounds(config,'log_fbreak',[-4,-2]),
@@ -732,11 +921,11 @@ def blip(paramsfile='params.ini',resume=False):
         sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
     
     ## set sph flags
-    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check)
+    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check) or ('multipoles' in sph_check)
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     
-    if inj['sph_flag']:
+    if inj['doInj'] and inj['sph_flag']:
         default_inj_lmax = max(params['lmax'], params.get('multipole_l', -1), inj.get('multipole_l', -1))
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
@@ -974,6 +1163,13 @@ def blip(paramsfile='params.ini',resume=False):
             mapmaker(post_samples, params, parameters, lisa.Model,  coord=params['healpy_proj'])
         else:
             mapmaker(post_samples, params, parameters, lisa.Model)
+    
+    multipoles_summary = summarize_multipoles_recovery(
+        lisa.Model,
+        np.atleast_2d(post_samples),
+        None if params['load_data'] else lisa.Injection,
+    )
+    write_multipoles_recovery_summary(params['out_dir'], multipoles_summary)
         
     
 

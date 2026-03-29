@@ -353,11 +353,8 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
             sm = Model.submodels[sm_name]
             model_legend_elements.append(Line2D([0],[0],color=sm.color,lw=3,label=sm.fancyname))
             ## this grabs the relevant bits of the posterior vector for each model
-            ## will need to fix this for the anisotropic case later...
             post_sm = [post[:,idx] for idx in range(start_idx,start_idx+sm.Npar)]
-            ## handle any additional spatial variables (will need to fix this when I introduce hierarchical models)
-            if hasattr(sm,"blm_start"):
-                post_sm = post_sm[:sm.blm_start]
+            post_sm = post_sm[:len(sm.spectral_parameters)]
             start_idx += sm.Npar
             ## the spectrum of every sample
             Sgw = sm.compute_Sgw(fs,post_sm)
@@ -442,13 +439,10 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
                     Np = 10**post_sm[0]
                     Na = 10**post_sm[1]
                     Sgw_j = sm.instr_noise_spectrum(fdata,f0,Np=Np,Na=Na)[2,2,:]
-                ## handle any additional spatial variables (will need to fix this when I introduce hierarchical models)
-                elif hasattr(sm,"blm_start"):
-                    post_sm_sph = post_sm[sm.blm_start:]
-                    post_sm = post_sm[:sm.blm_start]
-                    Sgw_j = np.mean(sm.compute_Sgw(fdata,post_sm)[:,None] * sm.compute_summed_response(sm.compute_skymap_alms(post_sm_sph))[0,0,filt,:],axis=1)
                 else:
-                    Sgw_j = np.mean(sm.compute_Sgw(fdata,post_sm)[:,None] * sm.response_mat[0,0,filt,:],axis=1)
+                    spectral_theta = post_sm[:len(sm.spectral_parameters)]
+                    response_mat = sm.compute_response_matrix(post_sm)
+                    Sgw_j = np.mean(sm.compute_Sgw(fdata,spectral_theta)[:,None] * response_mat[0,0,filt,:],axis=1)
                 
                 Sgw[jj,:] = np.real(Sgw_j)
             start_idx += sm.Npar
