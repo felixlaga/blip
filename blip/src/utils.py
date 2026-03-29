@@ -55,6 +55,7 @@ def gen_suffixes(names):
     shorthand = {'noise':{'abbrv':'','count':1},
                  'isgwb':{'abbrv':'I','count':1},
                  'sph':{'abbrv':'A','count':1},
+                 'alm':{'abbrv':'D','count':1},
                  'population':{'abbrv':'P','count':1},
                  'hierarchical':{'abbrv':'H','count':1} }
     

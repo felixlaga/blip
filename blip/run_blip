@@ -376,7 +376,9 @@ def blip(paramsfile='params.ini',resume=False):
     params['tdi_lev'] = str(config.get("params", "tdi_lev", fallback='xyz'))
     params['lisa_config'] = str(config.get("params", "lisa_config", fallback='orbiting'))
     params['nside'] = int(config.get("params", "nside"))
-    params['lmax'] = int(config.get("params", "lmax"))
+    params['lmax'] = int(config.get("params", "lmax", fallback=config.get("params", "alm_lmax", fallback=0)))
+    params['alm_lmax'] = int(config.get("params", "alm_lmax", fallback=params['lmax']))
+    params['alm_prior_bound'] = float(config.get("params", "alm_prior_bound", fallback=0.5))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
 
     ## see if we need to initialize the spherical harmonic subroutines
@@ -412,22 +414,24 @@ def blip(paramsfile='params.ini',resume=False):
         sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
         
     ## set sph flags
-    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check)
+    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('alm' in sph_check)
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     
     if inj['sph_flag']:
+        inj['inj_alm_lmax'] = int(config.get("inj", "inj_alm_lmax", fallback=params['alm_lmax']))
+        default_inj_lmax = max(params['lmax'], params['alm_lmax'], inj['inj_alm_lmax'])
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
         except configparser.NoOptionError as err:
             if params['sph_flag']:
-                print("Performing a spherical harmonic basis injection and inj_lmax has not been specified. Injection and recovery will use same lmax (lmax={}).".format(params['lmax']))
-                inj['inj_lmax'] = params['lmax']
+                print("Performing a spherical harmonic-capable injection and inj_lmax has not been specified. Using inj_lmax={}.".format(default_inj_lmax))
+                inj['inj_lmax'] = default_inj_lmax
             else:
                 print("You are trying to do a spherical harmonic injection, but have not specified lmax.")
                 if 'lmax' in params.keys():
                     print("Warning: using analysis lmax parameter for inj_lmax, but you are not performing a spherical harmonic analysis.")
-                    inj['inj_lmax'] = params['lmax']
+                    inj['inj_lmax'] = default_inj_lmax
                 else:
                     raise err
     

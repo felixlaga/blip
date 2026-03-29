@@ -1,5 +1,4 @@
 import numpy as np
-import legwork as lw
 import pandas as pd
 from blip.src.instrNoise import instrNoise
 from blip.src.geometry import geometry
@@ -11,6 +10,11 @@ from astropy import units as u
 from astropy import coordinates as cc
 from astropy.coordinates import SkyCoord
 from scipy.signal import medfilt
+
+try:
+    import legwork as lw
+except ImportError:
+    lw = None
 
 class Population():
 
@@ -25,6 +29,8 @@ class Population():
         
         Note that we don't carry around the entire set of binaries, just the overall population-level data.
         '''
+        if lw is None:
+            raise ImportError("Population models require the optional 'legwork' dependency, which is not installed in this environment.")
         self.params = params
         self.inj = inj
         self.frange = frange

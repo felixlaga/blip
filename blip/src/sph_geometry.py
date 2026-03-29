@@ -1,8 +1,19 @@
 import numpy as np
-from scipy.special import sph_harm
 import numpy.linalg as LA
 import healpy as hp
 from blip.src.clebschGordan import clebschGordan
+
+try:
+    from scipy.special import sph_harm as _scipy_sph_harm
+
+    def sph_harm_compat(mval, lval, phi, theta):
+        return _scipy_sph_harm(mval, lval, phi, theta)
+
+except ImportError:
+    from scipy.special import sph_harm_y as _scipy_sph_harm_y
+
+    def sph_harm_compat(mval, lval, phi, theta):
+        return _scipy_sph_harm_y(lval, mval, theta, phi)
 
 class sph_geometry(clebschGordan):
 
@@ -126,7 +137,7 @@ class sph_geometry(clebschGordan):
         ## Get the spherical harmonics
         for ii in range(alm_size):
             lval, mval = self.idxtoalm(almax, ii)
-            Ylms[:, ii] = sph_harm(mval, lval, phi, theta)
+            Ylms[:, ii] = sph_harm_compat(mval, lval, phi, theta)
 
 
         # Calculate the detector response for each frequency
@@ -281,5 +292,4 @@ class sph_geometry(clebschGordan):
                                     [np.conj(RAT), np.conj(RET), RTT] ])
 
         return aet_response_mat
-
 

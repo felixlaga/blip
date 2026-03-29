@@ -270,6 +270,56 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 ## create a wrapper b/c isotropic and anisotropic injection responses are different
                 self.inj_response_mat = self.summ_response_mat
         
+        ## This mode samples the normalized sky-power a_lm coefficients directly, with a_00 fixed.
+        ## It bypasses the latent b_lm parameterization and works directly in the power-map basis.
+        elif self.spatial_model_name == 'alm':
+            self.almax = self.get_selected_alm_lmax()
+            response_kwargs['set_almax'] = self.almax
+            
+            if self.params['tdi_lev']=='michelson':
+                self.response = self.asgwb_mich_response
+            elif self.params['tdi_lev']=='xyz':
+                self.response = self.asgwb_xyz_response
+            elif self.params['tdi_lev']=='aet':
+                self.response = self.asgwb_aet_response
+            else:
+                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
+            
+            ## compute the anisotropic response basis for the direct power-map harmonics
+            self.response_mat = self.response(f0,tsegmid,**response_kwargs)
+            
+            ## plotting stuff
+            self.fancyname = "Direct $a_{LM}$ "+self.fancyname
+            self.subscript = "_{\mathrm{aLM}}"
+            self.color = 'seagreen'
+            self.has_map = True
+            
+            ## add the direct a_lm parameters
+            alm_parameters = gen_alm_parameters(self.almax)
+            self.alm_start = len(self.spectral_parameters)
+            self.spatial_parameters = self.spatial_parameters + alm_parameters
+            
+            if not injection:
+                self.prior = self.alm_prior
+                self.cov = self.compute_cov_almgwb
+            else:
+                if 'alms' not in self.injvals.keys():
+                    raise ValueError("Direct a_lm injections require an 'alms' entry in [inj] truevals.")
+                
+                alms_healpy = self.direct_alm_values_2_healpy_alms(self.injvals['alms'], self.almax)
+                is_physical, skymap = self.direct_alm_is_physical(alms_healpy, return_map=True)
+                if not is_physical:
+                    raise ValueError("Injected a_lm coefficients produce a negative power map on the analysis sky grid. Please choose a physical set of alms.")
+                
+                val_list = self.alms_2_alm_params(alms_healpy, self.almax)
+                for param, val in zip(alm_parameters,val_list):
+                    self.truevals[param] = val
+                
+                self.alms_inj = self.healpy_alms_to_full(alms_healpy, self.almax)
+                self.sph_skymap = skymap
+                self.summ_response_mat = self.compute_summed_response(self.alms_inj)
+                self.inj_response_mat = self.summ_response_mat
+        
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
             
@@ -357,7 +407,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         elif self.spatial_model_name == 'hierarchical':
             pass
         else:
-            raise ValueError("Invalid specification of spatial model name ('{}'). Can be 'isgwb', 'sph', 'galaxy', or 'hierarchical'.".format(self.spatial_model_name))
+            raise ValueError("Invalid specification of spatial model name ('{}'). Can be 'isgwb', 'sph', 'alm', 'galaxy', or 'hierarchical'.".format(self.spatial_model_name))
         
         
         ## store final parameter list and count
@@ -558,6 +608,27 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             theta with each element rescaled for both the spectral and spatial parameters.
         '''
         pass
+    
+    def alm_prior(self,theta):
+        '''
+        Direct a_lm anisotropic prior transform. Combines the spectral prior with direct real/imag a_lm coefficients.
+        '''
+        spectral_theta = self.spectral_prior(theta[:self.alm_start])
+        alm_theta = []
+        
+        cnt = self.alm_start
+        alm_bound = self.params.get('alm_prior_bound', 0.5)
+        for lval in range(1, self.almax + 1):
+            for mval in range(lval + 1):
+                if mval == 0:
+                    alm_theta.append(2*alm_bound*theta[cnt] - alm_bound)
+                    cnt += 1
+                else:
+                    alm_theta.append(2*alm_bound*theta[cnt] - alm_bound)
+                    alm_theta.append(2*alm_bound*theta[cnt + 1] - alm_bound)
+                    cnt += 2
+        
+        return spectral_theta + alm_theta
         
         
     def instr_noise_prior(self,theta):
@@ -757,6 +828,20 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         cov_sgwb = Sgw[None, None, :, None]*summ_response_mat
         
         return cov_sgwb
+    
+    def compute_cov_almgwb(self,theta):
+        '''
+        Computes the covariance matrix contribution from a direct a_lm anisotropic stochastic GW signal.
+        '''
+        Sgw = self.compute_Sgw(self.fs,theta[:self.alm_start])
+        alms_healpy = self.alm_params_2_healpy_alms(theta[self.alm_start:], self.almax)
+        if not self.direct_alm_is_physical(alms_healpy):
+            return np.full((3, 3, self.fs.size, self.time_dim), np.nan, dtype='complex')
+        
+        summ_response_mat = self.compute_summed_response(self.healpy_alms_to_full(alms_healpy, self.almax))
+        cov_sgwb = Sgw[None, None, :, None]*summ_response_mat
+        
+        return cov_sgwb
 
        
     ##########################################
@@ -797,6 +882,165 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         '''
         return np.einsum('ijklm,m', self.response_mat, alms)
+    
+    def get_selected_alm_lmax(self):
+        '''
+        Return the direct a_lm power-map lmax for the direct-ALM mode.
+        '''
+        if self.injection:
+            alm_lmax = self.inj.get('inj_alm_lmax', self.params.get('alm_lmax', self.params.get('lmax', -1)))
+        else:
+            alm_lmax = self.params.get('alm_lmax', self.params.get('lmax', -1))
+        
+        alm_lmax = int(alm_lmax)
+        if alm_lmax < 0:
+            raise ValueError("The direct a_lm mode requires 'alm_lmax' >= 0 in the ini file.")
+        
+        return alm_lmax
+    
+    def get_direct_alm_l_parameter_indices(self, alm_lmax=None):
+        '''
+        Return the local parameter indices for each multipole L in the direct a_lm mode.
+        '''
+        if alm_lmax is None:
+            alm_lmax = self.almax
+        
+        l_parameter_indices = {}
+        cnt = self.alm_start
+        for lval in range(1, alm_lmax + 1):
+            indices = []
+            for mval in range(lval + 1):
+                if mval == 0:
+                    indices.append(cnt)
+                    cnt += 1
+                else:
+                    indices.extend([cnt, cnt + 1])
+                    cnt += 2
+            l_parameter_indices[lval] = indices
+        
+        return l_parameter_indices
+    
+    def direct_alm_values_2_healpy_alms(self, alm_values, alm_lmax=None):
+        '''
+        Convert user-specified direct a_lm values to healpy's m>=0 alm ordering.
+        
+        The input can either contain the full healpy-sized list including a_00, or omit a_00.
+        In either case, the coefficients are normalized so that a_00 = 1/sqrt(4*pi), which keeps
+        the overall amplitude in the spectral normalization instead of the sky coefficients.
+        '''
+        if alm_lmax is None:
+            alm_lmax = self.almax
+        
+        healpy_size = hp.Alm.getsize(alm_lmax)
+        alm_values = np.asarray(alm_values, dtype='complex')
+        
+        if alm_values.size == healpy_size:
+            alms = np.array(alm_values, dtype='complex')
+        elif alm_values.size == (healpy_size - 1):
+            alms = np.zeros(healpy_size, dtype='complex')
+            alms[0] = 1.0
+            alms[1:] = alm_values
+        else:
+            raise ValueError("Direct a_lm injections require {} complex coefficients in healpy order (including a_00), or {} coefficients if a_00 is omitted.".format(healpy_size, healpy_size - 1))
+        
+        if not np.isfinite(alms[0]) or np.abs(alms[0]) == 0:
+            raise ValueError("Direct a_lm injections require a non-zero monopole coefficient a_00 so the sky map can be normalized.")
+        if np.abs(np.imag(alms[0])) > 1e-10:
+            raise ValueError("For a real sky-power map, the injected a_00 coefficient must be real.")
+        
+        alms = alms/(np.real(alms[0]) * np.sqrt(4*np.pi))
+        alms[0] = 1/np.sqrt(4*np.pi)
+        
+        return alms
+    
+    def alm_params_2_healpy_alms(self, alm_params, alm_lmax=None):
+        '''
+        Convert direct a_lm parameter values to healpy's complex alm ordering with a_00 fixed.
+        '''
+        if alm_lmax is None:
+            alm_lmax = self.almax
+        
+        alm_params = np.asarray(alm_params, dtype=float)
+        expected_size = sum((2*lval + 1) for lval in range(1, alm_lmax + 1))
+        if alm_params.size != expected_size:
+            raise ValueError("The size of the direct a_lm parameter array does not match the size defined by alm_lmax.")
+        
+        alms = np.zeros(hp.Alm.getsize(alm_lmax), dtype='complex')
+        alms[0] = 1/np.sqrt(4*np.pi)
+        
+        cnt = 0
+        for lval in range(1, alm_lmax + 1):
+            for mval in range(lval + 1):
+                idx = hp.Alm.getidx(alm_lmax, lval, mval)
+                if mval == 0:
+                    alms[idx] = alm_params[cnt]
+                    cnt += 1
+                else:
+                    alms[idx] = alm_params[cnt] + 1j*alm_params[cnt + 1]
+                    cnt += 2
+        
+        return alms
+    
+    def alms_2_alm_params(self, alms, alm_lmax=None):
+        '''
+        Convert healpy-ordered complex a_lm coefficients to the direct parameter notation used by BLIP.
+        '''
+        if alm_lmax is None:
+            alm_lmax = self.almax
+        
+        healpy_size = hp.Alm.getsize(alm_lmax)
+        alms = np.asarray(alms, dtype='complex')
+        if alms.size == (alm_lmax + 1)**2:
+            alms = alms[:healpy_size]
+        elif alms.size != healpy_size:
+            raise ValueError("The size of the input a_lm array does not match the size defined by alm_lmax.")
+        
+        alm_params = []
+        for lval in range(1, alm_lmax + 1):
+            for mval in range(lval + 1):
+                idx = hp.Alm.getidx(alm_lmax, lval, mval)
+                if mval == 0:
+                    alm_params.append(np.real(alms[idx]))
+                else:
+                    alm_params.append(np.real(alms[idx]))
+                    alm_params.append(np.imag(alms[idx]))
+        
+        return alm_params
+    
+    def healpy_alms_to_full(self, alms, alm_lmax=None):
+        '''
+        Expand healpy's m>=0 alm storage to the full ordered list including negative m values.
+        '''
+        if alm_lmax is None:
+            alm_lmax = self.almax
+        
+        alms = np.asarray(alms, dtype='complex')
+        if alms.size != hp.Alm.getsize(alm_lmax):
+            raise ValueError("The size of the input a_lm array does not match healpy's expected size for alm_lmax.")
+        
+        full_alms = np.zeros((alm_lmax + 1)**2, dtype='complex')
+        for ii in range(full_alms.size):
+            lval, mval = self.idxtoalm(alm_lmax, ii)
+            idx = hp.Alm.getidx(alm_lmax, lval, np.abs(mval))
+            if mval >= 0:
+                full_alms[ii] = alms[idx]
+            else:
+                full_alms[ii] = (-1)**np.abs(mval) * np.conj(alms[idx])
+        
+        return full_alms
+    
+    def direct_alm_is_physical(self, alms, return_map=False):
+        '''
+        Check whether a direct a_lm power-map expansion is non-negative on the analysis sky grid.
+        '''
+        with log_manager(logging.ERROR):
+            skymap = np.real(hp.alm2map(alms, self.params['nside']))
+        
+        is_physical = np.all(np.isfinite(skymap)) and (np.min(skymap) >= -1e-10)
+        if return_map:
+            return is_physical, skymap
+        else:
+            return is_physical
     
     def process_astro_skymap(self,skymap):
         '''
@@ -990,16 +1234,23 @@ class Model():
             sm = self.submodels[sm_name]
             theta_i = theta[start_idx:(start_idx+sm.Npar)]
             start_idx += sm.Npar
+            cov_i = sm.cov(theta_i)
+            if not np.all(np.isfinite(cov_i)):
+                return -np.inf
             if i==0:
-                cov_mat = sm.cov(theta_i)
+                cov_mat = cov_i
             else:
-                cov_mat = cov_mat + sm.cov(theta_i)
+                cov_mat = cov_mat + cov_i
 
         ## change axis order to make taking an inverse easier
         cov_mat = np.moveaxis(cov_mat, [-2, -1], [0, 1])
+        if not np.all(np.isfinite(cov_mat)):
+            return -np.inf
 
         ## take inverse and determinant
         inv_cov, det_cov = bespoke_inv(cov_mat)
+        if not np.all(np.isfinite(inv_cov)) or not np.all(np.isfinite(det_cov)):
+            return -np.inf
 
         logL = -np.einsum('ijkl,ijkl', inv_cov, self.rmat) - np.einsum('ij->', np.log(np.pi * self.params['seglen'] * np.abs(det_cov)))
 
@@ -1290,6 +1541,24 @@ def gen_blm_parameters(blmax):
                 blm_parameters.append(r'$\phi_{' + str(lval) + str(mval) + '}$' )
     
     return blm_parameters
+
+def gen_alm_parameters(almax):
+    '''
+    Function to make the direct a_lm parameter name strings for all power-map coefficients of a given lmax.
+    
+    We fix a_00 = 1/sqrt(4*pi), so only l >= 1 coefficients are sampled. For m > 0, the real and imaginary
+    parts are sampled explicitly to preserve the reality condition of the sky map.
+    '''
+    alm_parameters = []
+    for lval in range(1, almax + 1):
+        for mval in range(lval + 1):
+            if mval == 0:
+                alm_parameters.append(r'$a_{' + str(lval) + str(mval) + '}$')
+            else:
+                alm_parameters.append(r'$\mathrm{Re}(a_{' + str(lval) + str(mval) + '})$')
+                alm_parameters.append(r'$\mathrm{Im}(a_{' + str(lval) + str(mval) + '})$')
+    
+    return alm_parameters
 
 
 def bespoke_inv(A):

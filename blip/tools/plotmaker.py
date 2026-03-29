@@ -7,13 +7,17 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerTuple
-from chainconsumer import ChainConsumer
 import healpy as hp
 from healpy import Alm
 from astropy import units as u
 import pickle, argparse
 import logging
 matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+
+try:
+    from chainconsumer import ChainConsumer
+except ImportError:
+    ChainConsumer = None
 
 
 def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None, post_map_kwargs={}, med_map_kwargs={}):
@@ -39,6 +43,7 @@ def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None
     
     
     sph_models = []
+    alm_models = []
     hierarchical_models = []
     for submodel_name in Model.submodel_names:
         ## spatial type will be the latter part of the name
@@ -46,9 +51,11 @@ def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None
         spatial_name = submodel_name.split('_')[-1].split('-')[0]
         if spatial_name == 'sph':
             sph_models.append(submodel_name)
+        elif spatial_name == 'alm':
+            alm_models.append(submodel_name)
         elif spatial_name == 'hierarchical':
             hierarchical_models.append(submodel_name)
-    if (len(sph_models)==0 ) and (len(hierarchical_models)==0):
+    if (len(sph_models)==0 ) and (len(alm_models)==0) and (len(hierarchical_models)==0):
         print("Called mapmaker but none of the recovery models have a non-isotropic spatial model. Skipping...")
         return
     
@@ -82,7 +89,7 @@ def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None
         omega_map = np.zeros(npix)
         
         ## only make a map if there's a map to make (this is also good life advice)
-        if submodel_name in sph_models+hierarchical_models:
+        if submodel_name in sph_models+alm_models+hierarchical_models:
             
             ## HEALpy is really, REALLY noisy sometimes. This stops that.
             logger = logging.getLogger()
@@ -93,22 +100,34 @@ def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None
             
             print("Computing marginalized posterior skymap for submodel: {}...".format(submodel_name))
             
+            valid_maps = 0
             for ii in range(post.shape[0]):
-                
-                ## get Omega(f=1mHz)
-                Omega_1mHz = sm.omegaf(1e-3,*post_i[ii,:sm.blm_start])
-                
-                ## convert blm params to full blms
-                blm_vals = sm.blm_params_2_blms(post_i[ii,sm.blm_start:])
-                
-                ## normalize, convert to map, and sum
-                norm = np.sum(blm_vals[0:(sm.lmax + 1)]**2) + np.sum(2*np.abs(blm_vals[(sm.lmax + 1):])**2)
-                
-                prob_map  = (1.0/norm) * (hp.alm2map(blm_vals, nside))**2
+                if submodel_name in alm_models:
+                    Omega_1mHz = sm.omegaf(1e-3,*post_i[ii,:sm.alm_start])
+                    alm_vals = sm.alm_params_2_healpy_alms(post_i[ii,sm.alm_start:], sm.almax)
+                    is_physical, prob_map = sm.direct_alm_is_physical(alm_vals, return_map=True)
+                    if not is_physical:
+                        continue
+                else:
+                    ## get Omega(f=1mHz)
+                    Omega_1mHz = sm.omegaf(1e-3,*post_i[ii,:sm.blm_start])
+                    
+                    ## convert blm params to full blms
+                    blm_vals = sm.blm_params_2_blms(post_i[ii,sm.blm_start:])
+                    
+                    ## normalize, convert to map, and sum
+                    norm = np.sum(blm_vals[0:(sm.lmax + 1)]**2) + np.sum(2*np.abs(blm_vals[(sm.lmax + 1):])**2)
+                    prob_map  = (1.0/norm) * (hp.alm2map(blm_vals, nside))**2
                 
                 omega_map = omega_map + Omega_1mHz * prob_map
+                valid_maps += 1
 
-            omega_map = omega_map/post.shape[0]
+            if valid_maps == 0:
+                print("No physical posterior sky maps were available for submodel {}. Skipping map output...".format(submodel_name))
+                start_idx += sm.Npar
+                logger.setLevel(logging.INFO)
+                continue
+            omega_map = omega_map/valid_maps
             
             
             # generating skymap
@@ -136,16 +155,27 @@ def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None
             # median values of the posteriors
             med_vals = np.median(post_i, axis=0)
             
-            # Omega(f=1mHz)
-            Omega_1mHz_median = sm.omegaf(1e-3,*med_vals[:sm.blm_start])
-            ## blms.
-            blms_median = np.append([1], med_vals[sm.blm_start:])
+            if submodel_name in alm_models:
+                Omega_1mHz_median = sm.omegaf(1e-3,*med_vals[:sm.alm_start])
+                alm_median_vals = sm.alm_params_2_healpy_alms(med_vals[sm.alm_start:], sm.almax)
+                is_physical, prob_map = sm.direct_alm_is_physical(alm_median_vals, return_map=True)
+                if not is_physical:
+                    logger.setLevel(logging.INFO)
+                    print("Median direct a_lm sample for submodel {} is not physical. Skipping median skymap...".format(submodel_name))
+                    start_idx += sm.Npar
+                    continue
+                Omega_median_map = Omega_1mHz_median * prob_map
+            else:
+                # Omega(f=1mHz)
+                Omega_1mHz_median = sm.omegaf(1e-3,*med_vals[:sm.blm_start])
+                ## blms.
+                blms_median = np.append([1], med_vals[sm.blm_start:])
+                
+                blm_median_vals = sm.blm_params_2_blms(blms_median)
             
-            blm_median_vals = sm.blm_params_2_blms(blms_median)
-        
-            norm = np.sum(blm_median_vals[0:(sm.lmax + 1)]**2) + np.sum(2*np.abs(blm_median_vals[(sm.lmax + 1):])**2)
+                norm = np.sum(blm_median_vals[0:(sm.lmax + 1)]**2) + np.sum(2*np.abs(blm_median_vals[(sm.lmax + 1):])**2)
 
-            Omega_median_map  =  Omega_1mHz_median * (1.0/norm) * (hp.alm2map(blm_median_vals, nside))**2
+                Omega_median_map  =  Omega_1mHz_median * (1.0/norm) * (hp.alm2map(blm_median_vals, nside))**2
             
             hp.mollview(Omega_median_map, coord=coord, cmap=cmap, **med_map_kwargs)
             
@@ -444,6 +474,125 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
     
 
   
+def _collect_truevals(params, Model, Injection=None):
+    '''
+    Collect the subset of injected true values corresponding to the active model parameters.
+    '''
+    if params['load_data']:
+        return {}, False
+    if Injection is None:
+        return {}, False
+    
+    inj_truevals = Injection.truevals
+    truevals = {}
+    for smn in Model.submodel_names:
+        for cmn in Injection.component_names:
+            if smn == cmn or (hasattr(Model.submodels[smn],"alias") and Model.submodels[smn].alias == cmn):
+                truevals |= {param:inj_truevals[cmn][param] for param in Model.submodels[smn].parameters if param in inj_truevals[cmn].keys()}
+    
+    return truevals, (len(truevals) > 0)
+
+
+def _render_corner_plot(post, parameter_names, output_path, truth=None, make_walks=False, walks_output_path=None):
+    '''
+    Render and save a ChainConsumer corner plot for the selected parameters.
+    '''
+    if ChainConsumer is None:
+        print("ChainConsumer is not installed; skipping corner plot generation for {}.".format(output_path))
+        return
+
+    npar = len(parameter_names)
+    if npar == 0:
+        return
+    
+    cc = ChainConsumer()
+    cc.add_chain(post, parameters=parameter_names)
+    cc.configure(smooth=False, kde=False, max_ticks=2, sigmas=np.array([1, 2]), label_font_size=18, tick_font_size=18,
+                 summary=False, statistics="max_central", spacing=2, summary_area=0.95, cloud=False, bins=1.2)
+    cc.configure_truth(color='g', ls='--', alpha=0.7)
+    
+    fig_extent = min(24, max(8, 1.75*npar))
+    if truth:
+        fig = cc.plotter.plot(figsize=(fig_extent, fig_extent), truth=truth)
+    else:
+        fig = cc.plotter.plot(figsize=(fig_extent, fig_extent))
+    
+    sum_data = cc.analysis.get_summary()
+    axes = np.array(fig.axes).reshape((npar, npar))
+    
+    for ii in range(npar):
+        ax = axes[ii, ii]
+        sum_ax = sum_data[parameter_names[ii]]
+        err = [sum_ax[2] - sum_ax[1], sum_ax[1] - sum_ax[0]]
+        
+        if np.abs(sum_ax[1]) <= 1e-3:
+            mean_def = '{0:.3e}'.format(sum_ax[1])
+            eidx = mean_def.find('e')
+            base = float(mean_def[0:eidx])
+            exponent = int(mean_def[eidx+1:])
+            mean_form = str(base)
+            exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
+        else:
+            mean_form = '{0:.3f}'.format(sum_ax[1])
+            exp_form = ''
+        
+        if np.abs(err[0]) <= 1e-2:
+            err[0] = '{0:.4f}'.format(err[0])
+        else:
+            err[0] = '{0:.2f}'.format(err[0])
+        
+        if np.abs(err[1]) <= 1e-2:
+            err[1] = '{0:.4f}'.format(err[1])
+        else:
+            err[1] = '{0:.2f}'.format(err[1])
+        
+        label = parameter_names[ii][:-1] + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}'+exp_form+'$'
+        ax.set_title(label, {'fontsize':18}, loc='left')
+    
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    
+    if make_walks and walks_output_path is not None:
+        fig = cc.plotter.plot_walks(truth=truth if truth else None, convolve=10)
+        plt.savefig(walks_output_path, dpi=200)
+        plt.close()
+
+
+def direct_alm_cornermaker(post, params, Model, Injection=None, saveto=None):
+    '''
+    Create per-L corner plots for direct a_lm recovery models.
+    '''
+    if ChainConsumer is None:
+        print("ChainConsumer is not installed; skipping per-L direct a_lm corner plots.")
+        return
+
+    truevals, knowTrue = _collect_truevals(params, Model, Injection=Injection)
+    start_idx = 0
+    
+    base_dir = saveto if saveto is not None else params['out_dir']
+    if base_dir[-1] != '/':
+        base_dir = base_dir + '/'
+    
+    for submodel_name in Model.submodel_names:
+        sm = Model.submodels[submodel_name]
+        spatial_name = submodel_name.split('_')[-1].split('-')[0]
+        post_i = post[:,start_idx:(start_idx+sm.Npar)]
+        
+        if spatial_name == 'alm':
+            print("Making per-L direct a_lm corner plots for submodel {}...".format(submodel_name))
+            spectral_indices = list(range(len(sm.spectral_parameters)))
+            l_parameter_indices = sm.get_direct_alm_l_parameter_indices(sm.almax)
+            for lval, local_indices in l_parameter_indices.items():
+                selected_indices = spectral_indices + local_indices
+                parameter_names = [sm.parameters[idx] for idx in selected_indices]
+                post_sel = post_i[:, selected_indices]
+                truth_sel = {param:truevals[param] for param in parameter_names if param in truevals} if knowTrue else None
+                output_path = base_dir + '{}_L{:02d}_corners.png'.format(submodel_name, lval)
+                _render_corner_plot(post_sel, parameter_names, output_path, truth=truth_sel)
+        
+        start_idx += sm.Npar
+
+
 def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
 
     '''
@@ -465,96 +614,32 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
     '''
 
     all_parameters = Model.parameters['all']
-    
-    ## get truevals if not using an external injection
-    if not params['load_data']:
-        if Injection is None:
-            print("Warning: Not using externally generated data, but no Injection object has been provided to the corner plotmaker. Returning without making plots...")
-            return
-        
-        inj_truevals = Injection.truevals
-        
-        truevals = {}
-        for smn in Model.submodel_names:
-            for cmn in Injection.component_names:
-                if smn == cmn or (hasattr(Model.submodels[smn],"alias") and Model.submodels[smn].alias == cmn):
-                    truevals |= {param:inj_truevals[cmn][param] for param in Model.submodels[smn].parameters if param in inj_truevals[cmn].keys()}
-                    
-        if len(truevals) > 0:
-            knowTrue = 1 ## Bit for whether we know the true vals or not
-        else:
-            knowTrue = 0
-    else:
-        knowTrue = 0
-    
+    truevals, knowTrue = _collect_truevals(params, Model, Injection=Injection)
     npar = Model.Npar
+    has_direct_alm_model = np.any([Model.submodels[sm_name].spatial_model_name == 'alm' for sm_name in Model.submodel_names])
+    
+    if (not params['load_data']) and (Injection is None):
+        print("Warning: Not using externally generated data, but no Injection object has been provided to the corner plotmaker. Returning without making plots...")
+        return
+
+    if ChainConsumer is None:
+        print("ChainConsumer is not installed; skipping corner plot generation.")
+        return
 
     if params['out_dir'][-1] != '/':
         params['out_dir'] = params['out_dir'] + '/'
-        
-    ## Make chainconsumer corner plots
-    cc = ChainConsumer()
-    cc.add_chain(post, parameters=all_parameters)
-    cc.configure(smooth=False, kde=False, max_ticks=2, sigmas=np.array([1, 2]), label_font_size=18, tick_font_size=18, \
-            summary=False, statistics="max_central", spacing=2, summary_area=0.95, cloud=False, bins=1.2)
-    cc.configure_truth(color='g', ls='--', alpha=0.7)
-
-    if knowTrue:
-        fig = cc.plotter.plot(figsize=(16, 16), truth=truevals)
-    else:
-        fig = cc.plotter.plot(figsize=(16, 16))
-
-    ## make axis labels to be parameter summaries
-    sum_data = cc.analysis.get_summary()
-    axes = np.array(fig.axes).reshape((npar, npar))
-
-    # Adjust axis labels
-    for ii in range(npar):
-        ax = axes[ii, ii]
-
-        # get the right summary for the parameter ii
-        sum_ax = sum_data[all_parameters[ii]]
-        err =  [sum_ax[2] - sum_ax[1], sum_ax[1]- sum_ax[0]]
-
-        if np.abs(sum_ax[1]) <= 1e-3:
-            mean_def = '{0:.3e}'.format(sum_ax[1])
-            eidx = mean_def.find('e')
-            base = float(mean_def[0:eidx])
-            exponent = int(mean_def[eidx+1:])
-            mean_form = str(base)
-            exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
-        else:
-            mean_form = '{0:.3f}'.format(sum_ax[1])
-            exp_form = ''
-
-        if np.abs(err[0]) <= 1e-2:
-            err[0] = '{0:.4f}'.format(err[0])
-        else:
-            err[0] = '{0:.2f}'.format(err[0])
-
-        if np.abs(err[1]) <= 1e-2:
-            err[1] = '{0:.4f}'.format(err[1])
-        else:
-            err[1] = '{0:.2f}'.format(err[1])
-
-        label =  all_parameters[ii][:-1] + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}'+exp_form+'$'
-
-        ax.set_title(label, {'fontsize':18}, loc='left')
-
-
-    ## Save posterior
-    if saveto is not None:
-        plt.savefig(saveto + 'corners.png', dpi=200)
-    else:
-        plt.savefig(params['out_dir'] + 'corners.png', dpi=200)
-    print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
-    plt.close()
     
-    if not params['load_data']:    
-        # plot walkers
-        fig = cc.plotter.plot_walks(truth=truevals, convolve=10)
-        plt.savefig(params['out_dir'] + 'plotwalks.png', dpi=200)
-        plt.close()
+    if has_direct_alm_model and npar > 30:
+        print("Skipping the all-parameter corner plot for the high-dimensional direct a_lm model; generating per-L corner plots instead.")
+    else:
+        output_path = (saveto + 'corners.png') if saveto is not None else (params['out_dir'] + 'corners.png')
+        walks_output_path = params['out_dir'] + 'plotwalks.png'
+        _render_corner_plot(post, all_parameters, output_path, truth=truevals if knowTrue else None,
+                            make_walks=(not params['load_data']), walks_output_path=walks_output_path)
+        print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
+    
+    if has_direct_alm_model:
+        direct_alm_cornermaker(post, params, Model, Injection=Injection, saveto=saveto)
 
 
 if __name__ == '__main__':
@@ -601,4 +686,3 @@ if __name__ == '__main__':
             mapmaker(post, params, parameters, Model, coord=params['healpy_proj'])
         else:
             mapmaker(post, params, parameters, Model)
-
