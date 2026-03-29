@@ -58,6 +58,18 @@ def parse_int_list(config, section, option, fallback=None):
     return values
 
 
+def parse_numeric_sequence(config, section, option, fallback=None):
+    '''
+    Parse a config option containing either a scalar or a list/tuple of floats.
+    '''
+    if not config.has_section(section) or not config.has_option(section, option):
+        return fallback
+    values = eval(str(config.get(section, option)))
+    if isinstance(values, (int, float, np.integer, np.floating)):
+        return float(values)
+    return [float(value) for value in values]
+
+
 class AnalysisBundle():
     '''
     Minimal wrapper with the attributes expected by the sampler/plotting helpers.
@@ -204,7 +216,14 @@ def extract_relative_multipole_truths(multipoles_submodel, injection_component):
     '''
     Convert a matching injected anisotropic sky into relative total powers A_L / A_0.
     '''
-    if injection_component is None or not hasattr(injection_component, 'alms_inj'):
+    if injection_component is None:
+        return None
+    if hasattr(injection_component, 'relative_multipole_truths'):
+        truth_lmax = min(multipoles_submodel.multipole_lmax, injection_component.relative_multipole_truths.size - 1)
+        truths = np.full(multipoles_submodel.multipole_lmax + 1, np.nan)
+        truths[:truth_lmax + 1] = injection_component.relative_multipole_truths[:truth_lmax + 1]
+        return truths
+    if not hasattr(injection_component, 'alms_inj'):
         return None
     available_lmax = int(np.sqrt(injection_component.alms_inj.size) - 1)
     truth_lmax = min(multipoles_submodel.multipole_lmax, available_lmax)
@@ -871,6 +890,7 @@ def blip(paramsfile='params.ini',resume=False):
     params['lisa_config'] = str(config.get("params", "lisa_config", fallback='orbiting'))
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
+    params['relative_multipole_ls'] = parse_int_list(config, "params", "relative_multipole_ls", fallback=None)
     params['multipole_l'] = int(config.get("params", "multipole_l", fallback=-1))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
     params['prior_bounds'] = {'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
@@ -884,6 +904,12 @@ def blip(paramsfile='params.ini',resume=False):
                               'log_fbreak':parse_prior_bounds(config,'log_fbreak',[-4,-2]),
                               'log_fcut':parse_prior_bounds(config,'log_fcut',[-4,-2]),
                               'log_fscale':parse_prior_bounds(config,'log_fscale',[-4,-2])}
+    if config.has_section('priors') and config.has_option('priors', 'log_A_ratio_prior'):
+        params['log_A_ratio_prior'] = str(config.get("priors", "log_A_ratio_prior")).lower()
+    else:
+        params['log_A_ratio_prior'] = 'uniform'
+    params['log_A_ratio_mean'] = parse_numeric_sequence(config, "priors", "log_A_ratio_mean", fallback=None)
+    params['log_A_ratio_sigma'] = parse_numeric_sequence(config, "priors", "log_A_ratio_sigma", fallback=None)
     params['debug_priors'] = int(config.get("run_params", "debug_priors", fallback=0))
     print("[BLIP priors] {}".format(format_prior_bounds_summary(params['prior_bounds'])))
 

@@ -1,6 +1,7 @@
 import numpy as np
 from matplotlib import pyplot as plt
 from scipy.interpolate import interp1d
+from scipy.stats import truncnorm
 import healpy as hp
 import logging
 from blip.src.utils import log_manager, catch_duplicates, gen_suffixes, catch_color_duplicates
@@ -322,13 +323,12 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
         elif self.spatial_model_name == 'multipoles':
             if injection:
-                raise ValueError("The relative multipole-spectrum model is analysis-only. Use a spherical-harmonic injection (e.g. powerlaw_sph with chosen blms) instead.")
-            
-            self.multipole_lmax = int(self.params['lmax'])
-            if self.multipole_lmax < 1:
-                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
-            
-            self.relative_multipole_ls = list(range(1, self.multipole_lmax + 1))
+                self.relative_multipole_ls, injection_log_A_ratios = self.parse_relative_multipole_truths()
+            else:
+                self.relative_multipole_ls = self.get_relative_multipole_ls()
+                injection_log_A_ratios = None
+
+            self.multipole_lmax = max(self.relative_multipole_ls)
             self.relative_multipole_start = len(self.spectral_parameters)
             self.spatial_parameters = self.spatial_parameters + [
                 self.get_relative_multipole_amplitude_parameter(lval) for lval in self.relative_multipole_ls
@@ -349,16 +349,29 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             self.response_mat, self.relative_response_mats = self.compute_multipole_response_bank(
                 f0,
                 tsegmid,
-                self.multipole_lmax,
+                self.relative_multipole_ls,
             )
-            
-            self.fancyname = "Relative Multipoles $L\\leq{}$ ".format(self.multipole_lmax) + self.fancyname
-            self.subscript = "_{\\mathrm{L\\leq" + str(self.multipole_lmax) + "}}"
+
+            if self.relative_multipole_ls == list(range(1, self.multipole_lmax + 1)):
+                self.fancyname = "Relative Multipoles $L\\leq{}$ ".format(self.multipole_lmax) + self.fancyname
+                self.subscript = "_{\\mathrm{L\\leq" + str(self.multipole_lmax) + "}}"
+            else:
+                ls_label = ",".join([str(lval) for lval in self.relative_multipole_ls])
+                self.fancyname = "Relative Multipoles (L={}) ".format(ls_label) + self.fancyname
+                self.subscript = "_{\\mathrm{L=" + ls_label + "}}"
             self.color = 'royalblue'
             self.has_map = False
-            
-            self.prior = self.multipoles_prior
-            self.cov = self.compute_cov_multipoles
+
+            if not injection:
+                self.prior = self.multipoles_prior
+                self.cov = self.compute_cov_multipoles
+            else:
+                self.relative_multipole_truths = np.full(self.multipole_lmax + 1, np.nan)
+                self.relative_multipole_truths[0] = 1.0
+                for multipole_l, log_A_ratio in zip(self.relative_multipole_ls, injection_log_A_ratios):
+                    self.truevals[self.get_relative_multipole_amplitude_parameter(multipole_l)] = log_A_ratio
+                    self.relative_multipole_truths[multipole_l] = 10**log_A_ratio
+                self.inj_response_mat = self.compute_relative_multipole_response(injection_log_A_ratios)
         
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
@@ -589,6 +602,18 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         lower, upper = self.get_prior_bounds(prior_key,default_bounds)
         return lower + (upper-lower)*np.asarray(unit_theta)
+
+    def rescale_truncated_normal_prior(self,unit_theta,mean,sigma,prior_key,default_bounds):
+        '''
+        Rescale unit-cube draws onto a truncated normal prior interval.
+        '''
+        if sigma <= 0:
+            raise ValueError("The truncated-normal prior for '{}' requires sigma > 0.".format(prior_key))
+        lower, upper = self.get_prior_bounds(prior_key,default_bounds)
+        a = (lower - mean) / sigma
+        b = (upper - mean) / sigma
+        clipped_theta = np.clip(np.asarray(unit_theta), 1e-12, 1.0 - 1e-12)
+        return truncnorm.ppf(clipped_theta, a, b, loc=mean, scale=sigma)
     
     def get_selected_multipole_l(self):
         '''
@@ -622,12 +647,96 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Return the ordered (L, m) pairs needed by the fixed-multipole mode.
         '''
         return [(multipole_l, mval) for mval in range(-multipole_l, multipole_l + 1)]
+
+    def get_relative_multipole_ls(self):
+        '''
+        Return the ordered multipoles to include in the relative-multipole model.
+        '''
+        configured_ls = self.params.get('relative_multipole_ls', None)
+        if configured_ls is None:
+            multipole_lmax = int(self.params['lmax'])
+            if multipole_lmax < 1:
+                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
+            relative_multipole_ls = list(range(1, multipole_lmax + 1))
+        else:
+            relative_multipole_ls = sorted(list(dict.fromkeys([int(value) for value in configured_ls])))
+            if len(relative_multipole_ls) == 0:
+                raise ValueError("The relative multipole-spectrum model requires at least one selected multipole.")
+            if np.any([value < 1 for value in relative_multipole_ls]):
+                raise ValueError("All selected relative multipoles must satisfy L >= 1.")
+
+        return relative_multipole_ls
+
+    def parse_relative_multipole_truths(self):
+        '''
+        Parse injected relative multipole amplitudes for the total-power model.
+        '''
+        if 'A_ratios' in self.injvals:
+            raw_ratios = self.injvals['A_ratios']
+            ratios_are_logged = False
+        elif 'log_A_ratios' in self.injvals:
+            raw_ratios = self.injvals['log_A_ratios']
+            ratios_are_logged = True
+        else:
+            raise ValueError(
+                "Injected 'powerlaw_multipoles' components must provide either 'A_ratios' or 'log_A_ratios'."
+            )
+
+        if isinstance(raw_ratios, dict):
+            keyed_values = {int(key): value for key, value in raw_ratios.items()}
+            relative_multipole_ls = sorted(list(dict.fromkeys([int(key) for key in keyed_values.keys()])))
+            raw_values = [keyed_values[key] for key in relative_multipole_ls]
+        else:
+            raw_values = list(raw_ratios)
+            relative_multipole_ls = list(range(1, len(raw_values) + 1))
+
+        if len(relative_multipole_ls) == 0:
+            raise ValueError("Injected relative multipoles must include at least one L >= 1 term.")
+        if np.any([value < 1 for value in relative_multipole_ls]):
+            raise ValueError("Injected relative multipole keys must satisfy L >= 1.")
+
+        log_A_ratios = []
+        for multipole_l, raw_value in zip(relative_multipole_ls, raw_values):
+            if ratios_are_logged:
+                log_A_ratio = float(raw_value)
+            else:
+                ratio = float(raw_value)
+                if ratio <= 0:
+                    raise ValueError(
+                        "Injected relative multipole A_{}/A_0 must be strictly positive. "
+                        "Omit a multipole from 'A_ratios' instead of setting it to zero.".format(multipole_l)
+                    )
+                log_A_ratio = float(np.log10(ratio))
+            log_A_ratios.append(log_A_ratio)
+
+        return relative_multipole_ls, np.asarray(log_A_ratios, dtype=float)
     
     def get_relative_multipole_amplitude_parameter(self,multipole_l):
         '''
         Parameter label for a relative multipole amplitude A_L / A_0.
         '''
         return r'$\log_{10} (A_{' + str(multipole_l) + '}/A_0)$'
+
+    def get_relative_multipole_prior_array(self,prior_key):
+        '''
+        Return a scalar-or-vector prior hyperparameter expanded to the selected multipoles.
+        '''
+        prior_value = self.params.get(prior_key, None)
+        if prior_value is None:
+            return None
+
+        prior_array = np.asarray(prior_value, dtype=float)
+        if prior_array.ndim == 0:
+            prior_array = np.repeat(prior_array, len(self.relative_multipole_ls))
+        elif prior_array.shape != (len(self.relative_multipole_ls),):
+            raise ValueError(
+                "Prior hyperparameter '{}' must be scalar or have length {}.".format(
+                    prior_key,
+                    len(self.relative_multipole_ls),
+                )
+            )
+
+        return prior_array
     
     def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
         '''
@@ -651,13 +760,18 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         return effective_response_sq
     
-    def compute_multipole_response_bank(self,f0,tsegmid,multipole_lmax):
+    def compute_multipole_response_bank(self,f0,tsegmid,multipole_ls):
         '''
-        Build the isotropic response plus one effective total-power response for each multipole L=1..multipole_lmax.
+        Build the isotropic response plus one effective total-power response for each selected multipole.
         '''
+        if np.isscalar(multipole_ls):
+            multipole_ls = list(range(1, int(multipole_ls) + 1))
+        else:
+            multipole_ls = [int(value) for value in multipole_ls]
+
         isotropic_response_mat = self.isotropic_response(f0,tsegmid)
         multipole_responses = []
-        for multipole_l in range(1, multipole_lmax + 1):
+        for multipole_l in multipole_ls:
             response_basis = self.anisotropic_response(
                 f0,
                 tsegmid,
@@ -772,10 +886,32 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Prior transform for the relative multipole-spectrum model.
         '''
         spectral_theta = self.spectral_prior(theta[:self.relative_multipole_start])
-        spatial_theta = [
-            self.rescale_uniform_prior(unit_theta,'log_A_ratio',[-6,6])
-            for unit_theta in theta[self.relative_multipole_start:]
-        ]
+        prior_kind = str(self.params.get('log_A_ratio_prior', 'uniform')).lower()
+        unit_spatial_theta = theta[self.relative_multipole_start:]
+
+        if prior_kind in ['uniform', 'flat']:
+            spatial_theta = [
+                self.rescale_uniform_prior(unit_theta,'log_A_ratio',[-6,6])
+                for unit_theta in unit_spatial_theta
+            ]
+        elif prior_kind in ['truncnorm', 'truncated_normal', 'truncated-normal']:
+            means = self.get_relative_multipole_prior_array('log_A_ratio_mean')
+            sigmas = self.get_relative_multipole_prior_array('log_A_ratio_sigma')
+            if means is None or sigmas is None:
+                raise ValueError(
+                    "The truncated-normal log_A_ratio prior requires both 'log_A_ratio_mean' "
+                    "and 'log_A_ratio_sigma' to be specified."
+                )
+            spatial_theta = [
+                self.rescale_truncated_normal_prior(unit_theta, mean, sigma, 'log_A_ratio', [-6,6])
+                for unit_theta, mean, sigma in zip(unit_spatial_theta, means, sigmas)
+            ]
+        else:
+            raise ValueError(
+                "Unknown log_A_ratio prior '{}'. Supported values are 'uniform' and 'truncnorm'.".format(
+                    prior_kind
+                )
+            )
         return spectral_theta + spatial_theta
     
     def hierarchical_prior(self,theta):

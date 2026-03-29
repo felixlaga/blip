@@ -61,6 +61,44 @@ class LISAdata():
         tsegmid = tsegstart + 0.5 * self.params['seglen']
         return tsegstart, tsegmid
 
+    def compute_covariance_square_root(self, covariance_stack):
+
+        '''
+        Return a matrix square root for a stack of Hermitian covariance matrices.
+
+        The fast path uses a Cholesky decomposition. When numerical roundoff or an
+        only-semi-definite anisotropic response prevents a strict Cholesky factor,
+        fall back to an eigendecomposition and clip negative modes to zero.
+        '''
+
+        covariance_stack = 0.5 * (covariance_stack + np.conjugate(np.swapaxes(covariance_stack, -1, -2)))
+
+        try:
+            return np.linalg.cholesky(covariance_stack), None
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(covariance_stack)
+            clipped_eigvals = np.clip(eigvals, 0.0, None)
+            factor = eigvecs * np.sqrt(clipped_eigvals)[:, None, :]
+
+            min_eigvals = eigvals[:, 0]
+            largest_abs_eigvals = np.max(np.abs(eigvals), axis=1)
+            worst_idx = int(np.argmin(min_eigvals))
+            largest_abs_eig = float(largest_abs_eigvals[worst_idx])
+            worst_min_eig = float(min_eigvals[worst_idx])
+            relative_violation = 0.0
+            if largest_abs_eig > 0.0:
+                relative_violation = float(max(0.0, -worst_min_eig) / largest_abs_eig)
+
+            stats = {
+                'num_nonpositive': int(np.count_nonzero(min_eigvals <= 0.0)),
+                'num_negative': int(np.count_nonzero(min_eigvals < 0.0)),
+                'worst_min_eig': worst_min_eig,
+                'largest_abs_eig': largest_abs_eig,
+                'relative_violation': relative_violation,
+            }
+
+            return factor, stats
+
 
     ## Method for reading frequency domain spectral data if given in an npz file
     def read_spectrum(self):
@@ -113,10 +151,19 @@ class LISAdata():
         ## the window for splicing
         splice_win = np.sin(np.pi * t_arr/N)
 
+        psd_projection_stats = []
+
         ## Loop over splice segments
         for ii in range(self.Injection.nsplice):
             ## move frequency to be the zeroth-axis, then cholesky decomp
-            L_cholesky = norms[:, None, None] *  np.linalg.cholesky(np.moveaxis(injmodel.inj_response_mat[:, :, :, ii], -1, 0))
+            response_factor, projection_stats = self.compute_covariance_square_root(
+                np.moveaxis(injmodel.inj_response_mat[:, :, :, ii], -1, 0)
+            )
+            if projection_stats is not None and projection_stats['num_nonpositive'] > 0:
+                projection_stats['segment_index'] = ii
+                psd_projection_stats.append(projection_stats)
+
+            L_cholesky = norms[:, None, None] * response_factor
             
             ## generate standard normal complex data first
             z_norm = np.random.normal(size=(self.Injection.frange.size, 3)) + 1j * np.random.normal(size=(self.Injection.frange.size, 3))
@@ -148,6 +195,23 @@ class LISAdata():
                 h2[-N:] = h2[-N:] + splice_win * np.fft.irfft(htilda2, N)
                 h3[-N:] = h3[-N:] + splice_win * np.fft.irfft(htilda3, N)
 
+        if len(psd_projection_stats) > 0:
+            total_projected = int(np.sum([stats['num_nonpositive'] for stats in psd_projection_stats]))
+            total_negative = int(np.sum([stats['num_negative'] for stats in psd_projection_stats]))
+            worst_stats = min(psd_projection_stats, key=lambda stats: stats['worst_min_eig'])
+            print(
+                "[BLIP injection] projected {} non-positive response bins ({} strictly negative) onto the PSD cone for {}. "
+                "Worst min eigenvalue = {:.3e} (relative {:.3e}) at splice segment {}/{}."
+                .format(
+                    total_projected,
+                    total_negative,
+                    injmodel.name,
+                    worst_stats['worst_min_eig'],
+                    worst_stats['relative_violation'],
+                    worst_stats['segment_index'] + 1,
+                    self.Injection.nsplice,
+                )
+            )
 
         ## remove the first half and the last half splice.
         h1, h2, h3 = h1[halfN:-halfN], h2[halfN:-halfN], h3[halfN:-halfN]
