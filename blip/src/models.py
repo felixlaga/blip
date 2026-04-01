@@ -322,13 +322,11 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
         ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
         elif self.spatial_model_name == 'multipoles':
-            if injection:
-                self.relative_multipole_ls, injection_log_A_ratios = self.parse_relative_multipole_truths()
-            else:
-                self.relative_multipole_ls = self.get_relative_multipole_ls()
-                injection_log_A_ratios = None
-
-            self.multipole_lmax = max(self.relative_multipole_ls)
+            self.multipole_lmax = int(self.inj['inj_lmax']) if injection else int(self.params['lmax'])
+            if self.multipole_lmax < 1:
+                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
+            
+            self.relative_multipole_ls = list(range(1, self.multipole_lmax + 1))
             self.relative_multipole_start = len(self.spectral_parameters)
             self.spatial_parameters = self.spatial_parameters + [
                 self.get_relative_multipole_amplitude_parameter(lval) for lval in self.relative_multipole_ls
@@ -361,17 +359,15 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.subscript = "_{\\mathrm{L=" + ls_label + "}}"
             self.color = 'royalblue'
             self.has_map = False
-
+            
             if not injection:
                 self.prior = self.multipoles_prior
                 self.cov = self.compute_cov_multipoles
             else:
-                self.relative_multipole_truths = np.full(self.multipole_lmax + 1, np.nan)
-                self.relative_multipole_truths[0] = 1.0
-                for multipole_l, log_A_ratio in zip(self.relative_multipole_ls, injection_log_A_ratios):
-                    self.truevals[self.get_relative_multipole_amplitude_parameter(multipole_l)] = log_A_ratio
-                    self.relative_multipole_truths[multipole_l] = 10**log_A_ratio
-                self.inj_response_mat = self.compute_relative_multipole_response(injection_log_A_ratios)
+                injected_log_amplitudes = self.get_injected_relative_multipole_log_amplitudes()
+                for parameter_name, parameter_value in zip(self.spatial_parameters, injected_log_amplitudes):
+                    self.truevals[parameter_name] = parameter_value
+                self.inj_response_mat = self.compute_relative_multipole_response(injected_log_amplitudes)
         
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
@@ -717,26 +713,34 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         return r'$\log_{10} (A_{' + str(multipole_l) + '}/A_0)$'
 
-    def get_relative_multipole_prior_array(self,prior_key):
+    def get_injected_relative_multipole_log_amplitudes(self):
         '''
-        Return a scalar-or-vector prior hyperparameter expanded to the selected multipoles.
-        '''
-        prior_value = self.params.get(prior_key, None)
-        if prior_value is None:
-            return None
+        Return the injected log10(A_L / A_0) values for L=1..multipole_lmax.
 
-        prior_array = np.asarray(prior_value, dtype=float)
-        if prior_array.ndim == 0:
-            prior_array = np.repeat(prior_array, len(self.relative_multipole_ls))
-        elif prior_array.shape != (len(self.relative_multipole_ls),):
+        The injection config may specify either linear amplitudes via
+        ``A_ratios`` or log-amplitudes via ``log_A_ratios``.
+        '''
+        if 'log_A_ratios' in self.injvals:
+            log_amplitudes = np.asarray(self.injvals['log_A_ratios'], dtype=float)
+        elif 'A_ratios' in self.injvals:
+            amplitudes = np.asarray(self.injvals['A_ratios'], dtype=float)
+            if np.any(amplitudes <= 0):
+                raise ValueError("Injected multipole ratios in 'A_ratios' must all be > 0.")
+            log_amplitudes = np.log10(amplitudes)
+        else:
             raise ValueError(
-                "Prior hyperparameter '{}' must be scalar or have length {}.".format(
-                    prior_key,
-                    len(self.relative_multipole_ls),
-                )
+                "The relative multipole-spectrum injection requires either "
+                "'A_ratios' or 'log_A_ratios' in the truevals dictionary."
             )
 
-        return prior_array
+        expected_shape = (len(self.relative_multipole_ls),)
+        if log_amplitudes.shape != expected_shape:
+            raise ValueError(
+                "Expected {} injected relative multipole amplitudes, got {}."
+                .format(len(self.relative_multipole_ls), log_amplitudes.size)
+            )
+
+        return log_amplitudes
     
     def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
         '''
