@@ -947,7 +947,13 @@ def blip(paramsfile='params.ini',resume=False):
         sph_check = sph_check + [sublist.split('-')[0].split('_')[-1] for sublist in inj['injection'].split('+')]
     
     ## set sph flags
-    params['sph_flag'] = ('sph' in sph_check) or ('hierarchical' in sph_check) or ('multipole' in sph_check) or ('multipoles' in sph_check)
+    params['sph_flag'] = (
+        ('sph' in sph_check)
+        or ('hierarchical' in sph_check)
+        or ('multipole' in sph_check)
+        or ('multipoles' in sph_check)
+        or ('relmultipole' in sph_check)
+    )
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     

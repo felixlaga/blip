@@ -321,6 +321,54 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
         ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
+        elif self.spatial_model_name == 'relmultipole':
+            self.multipole_l = self.get_selected_multipole_l()
+            self.relative_multipole_ls = [self.multipole_l]
+            self.relative_multipole_start = len(self.spectral_parameters)
+            self.spatial_parameters = self.spatial_parameters + [
+                self.get_single_relative_multipole_amplitude_parameter()
+            ]
+
+            if self.params['tdi_lev'] == 'michelson':
+                self.isotropic_response = self.isgwb_mich_response
+                self.anisotropic_response = self.asgwb_mich_response
+            elif self.params['tdi_lev'] == 'xyz':
+                self.isotropic_response = self.isgwb_xyz_response
+                self.anisotropic_response = self.asgwb_xyz_response
+            elif self.params['tdi_lev'] == 'aet':
+                self.isotropic_response = self.isgwb_aet_response
+                self.anisotropic_response = self.asgwb_aet_response
+            else:
+                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
+
+            self.response_mat = self.isotropic_response(f0,tsegmid)
+            relative_response_basis = self.anisotropic_response(
+                f0,
+                tsegmid,
+                set_almax=self.multipole_l,
+                set_lm_pairs=self.get_single_multipole_lm_pairs(self.multipole_l),
+            )
+            self.relative_response_mat = self.compute_single_multipole_response(
+                relative_response_basis,
+                self.multipole_l,
+                basis_already_selected=True,
+            )
+
+            self.fancyname = "Isotropic + Relative Multipole $L={}$ ".format(self.multipole_l) + self.fancyname
+            self.subscript = "_{\\mathrm{I+L=" + str(self.multipole_l) + "}}"
+            self.color = 'royalblue'
+            self.has_map = False
+
+            if not injection:
+                self.prior = self.single_relative_multipole_prior
+                self.cov = self.compute_cov_single_relative_multipole
+            else:
+                injected_log_amplitude = self.get_injected_single_relative_multipole_log_amplitude()
+                self.truevals[self.spatial_parameters[0]] = injected_log_amplitude
+                self.inj_response_mat = self.compute_single_relative_multipole_response(injected_log_amplitude)
+
+        ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
+        ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
         elif self.spatial_model_name == 'multipoles':
             self.multipole_lmax = int(self.inj['inj_lmax']) if injection else int(self.params['lmax'])
             if self.multipole_lmax < 1:
@@ -458,7 +506,7 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         elif self.spatial_model_name == 'hierarchical':
             pass
         else:
-            raise ValueError("Invalid specification of spatial model name ('{}'). Can be 'isgwb', 'sph', 'galaxy', or 'hierarchical'.".format(self.spatial_model_name))
+            raise ValueError("Invalid specification of spatial model name ('{}').".format(self.spatial_model_name))
         
         
         ## store final parameter list and count
@@ -631,6 +679,12 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Parameter label for the single-multipole total-power amplitude.
         '''
         return r'$\log_{10} (A_{' + str(self.get_selected_multipole_l()) + '})$'
+
+    def get_single_relative_multipole_amplitude_parameter(self):
+        '''
+        Parameter label for a single relative multipole amplitude A_L / A_0.
+        '''
+        return r'$\log_{10} (A_{' + str(self.get_selected_multipole_l()) + '}/A_0)$'
     
     def get_single_multipole_indices(self,multipole_l):
         '''
@@ -712,6 +766,50 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         Parameter label for a relative multipole amplitude A_L / A_0.
         '''
         return r'$\log_{10} (A_{' + str(multipole_l) + '}/A_0)$'
+
+    def get_relative_multipole_prior_array(self,key):
+        '''
+        Return a per-selected-multipole array for a relative-multipole prior hyperparameter.
+        '''
+        values = self.params.get(key, None)
+        if values is None:
+            return None
+
+        if np.isscalar(values):
+            return np.full(len(self.relative_multipole_ls), float(values), dtype=float)
+
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1:
+            raise ValueError("Relative multipole prior hyperparameter '{}' must be scalar or 1D.".format(key))
+        if values.size == 1:
+            return np.full(len(self.relative_multipole_ls), float(values[0]), dtype=float)
+        if values.size != len(self.relative_multipole_ls):
+            raise ValueError(
+                "Relative multipole prior hyperparameter '{}' expected {} values, got {}."
+                .format(key, len(self.relative_multipole_ls), values.size)
+            )
+        return values
+
+    def get_injected_single_relative_multipole_log_amplitude(self):
+        '''
+        Return the injected log10(A_L / A_0) for the selected fixed multipole.
+        '''
+        if 'log_A_ratio' in self.injvals:
+            return float(self.injvals['log_A_ratio'])
+        if 'A_ratio' in self.injvals:
+            ratio = float(self.injvals['A_ratio'])
+            if ratio <= 0:
+                raise ValueError("Injected single relative multipole A_L/A_0 must be > 0.")
+            return float(np.log10(ratio))
+
+        relative_multipole_ls, log_A_ratios = self.parse_relative_multipole_truths()
+        if self.multipole_l not in relative_multipole_ls:
+            raise ValueError(
+                "Injected relative multipole truths do not include the selected multipole L={}."
+                .format(self.multipole_l)
+            )
+        relative_index = relative_multipole_ls.index(self.multipole_l)
+        return float(log_A_ratios[relative_index])
 
     def get_injected_relative_multipole_log_amplitudes(self):
         '''
@@ -811,6 +909,25 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
         )
         
+        return combined_response_mat
+
+    def compute_single_relative_multipole_response(self,log10_relative_amplitude):
+        '''
+        Combine the isotropic response with one selected relative multipole A_L / A_0.
+        '''
+        log10_relative_amplitude = np.asarray(log10_relative_amplitude, dtype=float).reshape(-1)
+        if log10_relative_amplitude.size != 1:
+            raise ValueError(
+                "Expected one selected relative multipole amplitude, got {}."
+                .format(log10_relative_amplitude.size)
+            )
+
+        combined_response_mat = np.array(self.response_mat, copy=True)
+        combined_response_mat = combined_response_mat + (10**log10_relative_amplitude[0]) * self.relative_response_mat
+        combined_response_mat = 0.5 * (
+            combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
+        )
+
         return combined_response_mat
     
     #############################
@@ -916,6 +1033,43 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                     prior_kind
                 )
             )
+        return spectral_theta + spatial_theta
+
+    def single_relative_multipole_prior(self,theta):
+        '''
+        Prior transform for the shared-spectrum isotropic + fixed relative-multipole model.
+        '''
+        spectral_theta = self.spectral_prior(theta[:self.relative_multipole_start])
+        prior_kind = str(self.params.get('log_A_ratio_prior', 'uniform')).lower()
+        unit_spatial_theta = theta[self.relative_multipole_start:]
+        if len(unit_spatial_theta) != 1:
+            raise ValueError(
+                "The single relative multipole prior expected exactly one spatial parameter, got {}."
+                .format(len(unit_spatial_theta))
+            )
+
+        if prior_kind in ['uniform', 'flat']:
+            spatial_theta = [
+                self.rescale_uniform_prior(unit_spatial_theta[0], 'log_A_ratio', [-6,6])
+            ]
+        elif prior_kind in ['truncnorm', 'truncated_normal', 'truncated-normal']:
+            means = self.get_relative_multipole_prior_array('log_A_ratio_mean')
+            sigmas = self.get_relative_multipole_prior_array('log_A_ratio_sigma')
+            if means is None or sigmas is None:
+                raise ValueError(
+                    "The truncated-normal log_A_ratio prior requires both 'log_A_ratio_mean' "
+                    "and 'log_A_ratio_sigma' to be specified."
+                )
+            spatial_theta = [
+                self.rescale_truncated_normal_prior(unit_spatial_theta[0], means[0], sigmas[0], 'log_A_ratio', [-6,6])
+            ]
+        else:
+            raise ValueError(
+                "Unknown log_A_ratio prior '{}'. Supported values are 'uniform' and 'truncnorm'.".format(
+                    prior_kind
+                )
+            )
+
         return spectral_theta + spatial_theta
     
     def hierarchical_prior(self,theta):
@@ -1143,6 +1297,17 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         return cov_sgwb
 
+    def compute_cov_single_relative_multipole(self,theta):
+        '''
+        Compute the covariance from the shared-spectrum isotropic + fixed relative-multipole model.
+        '''
+        spectral_theta = theta[:self.relative_multipole_start]
+        spatial_theta = theta[self.relative_multipole_start:]
+        Sgw = self.compute_Sgw(self.fs,spectral_theta)
+        cov_sgwb = Sgw[None, None, :, None] * self.compute_single_relative_multipole_response(spatial_theta)
+
+        return cov_sgwb
+
        
     ##########################################
     ##   Skymap and Response Calculations   ##
@@ -1203,6 +1368,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         if self.spatial_model_name == 'sph':
             return self.compute_summed_response(self.compute_skymap_alms(theta[self.blm_start:]))
+        if self.spatial_model_name == 'relmultipole':
+            return self.compute_single_relative_multipole_response(theta[self.relative_multipole_start:])
         if self.spatial_model_name == 'multipoles':
             return self.compute_relative_multipole_response(theta[self.relative_multipole_start:])
         return self.response_mat
