@@ -4,7 +4,9 @@ import pickle
 import numpy as np
 import sys, os,configparser, subprocess
 import copy
-sys.path.append(os.getcwd()) ## this lets python find src
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
 from blip.src.makeLISAdata import LISAdata
 from blip.src.models import Model, Injection
 from blip.src.utils import ensure_color_matching
@@ -77,6 +79,38 @@ class AnalysisBundle():
     def __init__(self, model, injection=None):
         self.Model = model
         self.Injection = injection
+
+
+def extract_final_log_evidence(logz, logzerr):
+    '''
+    Return the final nested-sampling evidence pair from the sampler history arrays.
+    '''
+    if logz is None or logzerr is None:
+        return None, None
+
+    logz = np.asarray(logz, dtype=float).reshape(-1)
+    logzerr = np.asarray(logzerr, dtype=float).reshape(-1)
+    if logz.size == 0 or logzerr.size == 0:
+        return None, None
+
+    return float(logz[-1]), float(logzerr[-1])
+
+
+def write_evidence_summary(out_dir, sampler, logz=None, logzerr=None):
+    '''
+    Save a compact human-readable evidence summary for the run.
+    '''
+    summary_path = os.path.join(out_dir, 'evidence_summary.txt')
+    final_logz, final_logzerr = extract_final_log_evidence(logz, logzerr)
+
+    with open(summary_path, 'w') as outfile:
+        outfile.write("sampler {}\n".format(sampler))
+        if final_logz is None or final_logzerr is None:
+            outfile.write("logz unavailable\n")
+            outfile.write("logzerr unavailable\n")
+        else:
+            outfile.write("logz {:.16e}\n".format(final_logz))
+            outfile.write("logzerr {:.16e}\n".format(final_logzerr))
 
 
 def save_model_and_injection(out_dir, model, injection=None):
@@ -819,6 +853,7 @@ def run_multipole_sweep(paramsfile, params, inj, nlive, nthread, resume=False):
         np.savetxt(run_params['out_dir'] + "/post_samples.txt", post_samples)
         np.savetxt(run_params['out_dir'] + "/logz.txt", logz)
         np.savetxt(run_params['out_dir'] + "/logzerr.txt", logzerr)
+        write_evidence_summary(run_params['out_dir'], run_params['sampler'], logz, logzerr)
         
         with open(run_params['out_dir'] + '/config.pickle', 'wb') as outfile:
             pickle.dump(run_params, outfile)
@@ -868,6 +903,7 @@ def blip(paramsfile='params.ini',resume=False):
     if len(read_files) == 0:
         raise FileNotFoundError("Could not read BLIP config file '{}'.".format(paramsfile))
     config_path = os.path.abspath(read_files[0])
+    config_dir = os.path.dirname(config_path)
     print("[BLIP config] requested={}, loaded={}".format(config_path, read_files))
 
     # Params Dict
@@ -883,6 +919,7 @@ def blip(paramsfile='params.ini',resume=False):
     params['fref'] = float(config.get("params", "fref", fallback=25))
     
     params['model'] = str(config.get("params", "model"))
+    params['config_dir'] = config_dir
     
     params['alias'] = eval(str(config.get("params","alias",fallback="{}")))
 
@@ -891,6 +928,7 @@ def blip(paramsfile='params.ini',resume=False):
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
     params['relative_multipole_ls'] = parse_int_list(config, "params", "relative_multipole_ls", fallback=None)
+    params['absolute_multipole_ls'] = parse_int_list(config, "params", "absolute_multipole_ls", fallback=None)
     params['multipole_l'] = int(config.get("params", "multipole_l", fallback=-1))
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
     params['prior_bounds'] = {'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
@@ -951,6 +989,7 @@ def blip(paramsfile='params.ini',resume=False):
         ('sph' in sph_check)
         or ('hierarchical' in sph_check)
         or ('multipole' in sph_check)
+        or ('fixedmultipoles' in sph_check)
         or ('multipoles' in sph_check)
         or ('relmultipole' in sph_check)
     )
@@ -958,7 +997,13 @@ def blip(paramsfile='params.ini',resume=False):
     inj['pop_flag'] = 'population' in sph_check
     
     if inj['doInj'] and inj['sph_flag']:
-        default_inj_lmax = max(params['lmax'], params.get('multipole_l', -1), inj.get('multipole_l', -1))
+        default_inj_lmax = max(
+            params['lmax'],
+            params.get('multipole_l', -1),
+            inj.get('multipole_l', -1),
+            -1 if params.get('relative_multipole_ls') is None else max(params['relative_multipole_ls']),
+            -1 if params.get('absolute_multipole_ls') is None else max(params['absolute_multipole_ls']),
+        )
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
         except configparser.NoOptionError as err:
@@ -1082,6 +1127,9 @@ def blip(paramsfile='params.ini',resume=False):
     else:
         print("Resuming a previous analysis. Reloading data and sampler state...")
 
+    logz = None
+    logzerr = None
+
     if params['sampler'] == 'dynesty':
         # Create engine
         if not resume:
@@ -1171,6 +1219,8 @@ def blip(paramsfile='params.ini',resume=False):
     
     else:
         raise TypeError('Unknown sampler model chosen. Only dynesty, nessai, & emcee are supported')
+
+    write_evidence_summary(params['out_dir'], params['sampler'], logz, logzerr)
 
 
     # Save parameters as a pickle

@@ -1,5 +1,7 @@
-import sys, os
-sys.path.append(os.getcwd()) ## this lets python find src
+import sys, os, re
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -85,6 +87,96 @@ def format_bound_title(parameter, bound):
         err[1] = '{0:.2f}'.format(err[1])
 
     return label_base + ' = ' + mean_form + '^{+' + err[0] + '}_{-' + err[1] + '}' + exp_form + label_suffix
+
+
+def collect_truevals(params, Model, Injection=None):
+    '''
+    Gather the injected truths that correspond to the active recovery parameters.
+    '''
+    if params['load_data'] or Injection is None:
+        return {}
+
+    truevals = {}
+    inj_truevals = Injection.truevals
+    for smn in Model.submodel_names:
+        for cmn in Injection.component_names:
+            if smn == cmn or (hasattr(Model.submodels[smn], "alias") and Model.submodels[smn].alias == cmn):
+                truevals |= {
+                    param: inj_truevals[cmn][param]
+                    for param in Model.submodels[smn].parameters
+                    if param in inj_truevals[cmn].keys()
+                }
+    return truevals
+
+
+def is_absolute_amplitude_parameter(parameter):
+    '''
+    Identify absolute-amplitude parameters that deserve standalone 1D marginals.
+    '''
+    if r'\Omega_0' in parameter:
+        return True
+    return ('A_{' in parameter) and ('/A_0' not in parameter)
+
+
+def parameter_filename_stub(parameter, parameter_idx):
+    '''
+    Build a stable filename stem for a plotted parameter.
+    '''
+    if r'\Omega_0' in parameter:
+        return 'log_omega0'
+
+    amplitude_match = re.search(r'A_\{(\d+)\}', parameter)
+    if amplitude_match is not None:
+        return 'log_A_L{}'.format(amplitude_match.group(1))
+
+    sanitized = re.sub(r'[^0-9A-Za-z]+', '_', parameter).strip('_')
+    if sanitized == '':
+        sanitized = 'parameter_{:02d}'.format(parameter_idx)
+    return sanitized
+
+
+def format_simple_interval_title(parameter, samples):
+    '''
+    Format a compact summary title for a 1D posterior panel.
+    '''
+    qlo, qmed, qhi = simple_interval(samples)
+    err_hi = qhi - qmed
+    err_lo = qmed - qlo
+    label_base = parameter[:-1] if parameter.endswith('$') else parameter
+    label_suffix = '$' if parameter.endswith('$') else ''
+    return label_base + ' = {:.3g}^{{+{:.2g}}}_{{-{:.2g}}}'.format(qmed, err_hi, err_lo) + label_suffix
+
+
+def plot_absolute_amplitude_marginals(post, params, all_parameters, truevals=None, saveto=None):
+    '''
+    Save one standalone 1D posterior panel for each absolute-amplitude parameter.
+    '''
+    post = np.atleast_2d(post)
+    if truevals is None:
+        truevals = {}
+
+    save_dir = saveto if saveto is not None else params['out_dir']
+    for parameter_idx, parameter in enumerate(all_parameters):
+        if not is_absolute_amplitude_parameter(parameter):
+            continue
+
+        samples = post[:, parameter_idx]
+        qlo, qmed, qhi = simple_interval(samples)
+
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.hist(samples, bins=40, density=True, color='slateblue', alpha=0.75)
+        ax.axvspan(qlo, qhi, color='slateblue', alpha=0.18)
+        ax.axvline(qmed, color='k', lw=1.5, label='Median')
+        if parameter in truevals:
+            ax.axvline(truevals[parameter], color='g', ls='--', lw=1.5, alpha=0.8, label='Injection')
+        ax.set_xlabel(parameter, fontsize=12)
+        ax.set_yticks([])
+        ax.set_title(format_simple_interval_title(parameter, samples), fontsize=12, loc='left')
+        if parameter in truevals:
+            ax.legend(loc='best')
+        fig.tight_layout()
+        fig.savefig(os.path.join(save_dir, 'marginal_{}.png'.format(parameter_filename_stub(parameter, parameter_idx))), dpi=200)
+        plt.close(fig)
 
 
 def mapmaker(post, params, parameters, Model, saveto=None, coord=None, cmap=None, post_map_kwargs={}, med_map_kwargs={}):
@@ -529,28 +621,16 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         Dimensionality of the parameter space
     '''
 
+    post = np.atleast_2d(post)
     all_parameters = Model.parameters['all']
     
     ## get truevals if not using an external injection
-    if not params['load_data']:
-        if Injection is None:
-            print("Warning: Not using externally generated data, but no Injection object has been provided to the corner plotmaker. Returning without making plots...")
-            return
-        
-        inj_truevals = Injection.truevals
-        
-        truevals = {}
-        for smn in Model.submodel_names:
-            for cmn in Injection.component_names:
-                if smn == cmn or (hasattr(Model.submodels[smn],"alias") and Model.submodels[smn].alias == cmn):
-                    truevals |= {param:inj_truevals[cmn][param] for param in Model.submodels[smn].parameters if param in inj_truevals[cmn].keys()}
-                    
-        if len(truevals) > 0:
-            knowTrue = 1 ## Bit for whether we know the true vals or not
-        else:
-            knowTrue = 0
-    else:
-        knowTrue = 0
+    if not params['load_data'] and Injection is None:
+        print("Warning: Not using externally generated data, but no Injection object has been provided to the corner plotmaker. Returning without making plots...")
+        return
+
+    truevals = collect_truevals(params, Model, Injection)
+    knowTrue = int(len(truevals) > 0)
     
     npar = Model.Npar
 
@@ -604,6 +684,7 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
             plt.savefig(params['out_dir'] + 'corners.png', dpi=200)
         print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
         plt.close()
+        plot_absolute_amplitude_marginals(post, params, all_parameters, truevals=truevals, saveto=saveto)
         
         if not params['load_data']:
             print("ChainConsumer is not installed. Skipping walker plot generation.")
@@ -639,6 +720,7 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         fig.savefig(params['out_dir'] + 'corners.png', dpi=200)
     print("Posteriors plots printed in " + params['out_dir'] + "corners.png")
     plt.close(fig)
+    plot_absolute_amplitude_marginals(post, params, all_parameters, truevals=truevals, saveto=saveto)
     
     if not params['load_data']:    
         # plot walkers

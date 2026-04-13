@@ -29,6 +29,8 @@ class LISAdata():
         if os.path.isabs(input_spectrum):
             return input_spectrum
         if os.path.dirname(input_spectrum):
+            if self.params.get('config_dir', None) is not None:
+                return os.path.abspath(os.path.join(self.params['config_dir'], input_spectrum))
             return os.path.abspath(input_spectrum)
         return os.path.join(self.params['out_dir'], input_spectrum)
 
@@ -46,6 +48,8 @@ class LISAdata():
             return None
         if os.path.isabs(datafile):
             return datafile
+        if self.params.get('config_dir', None) is not None:
+            return os.path.abspath(os.path.join(self.params['config_dir'], datafile))
         return os.path.abspath(datafile)
 
     def build_segment_times(self, nsegs):
