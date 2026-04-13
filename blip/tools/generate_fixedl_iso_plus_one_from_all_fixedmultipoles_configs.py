@@ -13,7 +13,8 @@ SHARED_SPECTRUM = OUTPUT_ROOT + "/shared_data/shared_all_fixedmultipoles_l10_spe
 # benchmark onto the plain Omega parameters used by the code.
 H0_BLIP = 2.2e-18
 H100 = 100.0 * 1000.0 / 3.085677581491367e22
-LISA_FREF = 2.5e-2
+LISA_FREF = 2.5e-3
+OBSERVATION_DURATION_SECONDS = int(4 * 365.25 * 24 * 60 * 60)
 INJECTION_ALPHA = 0.0
 TARGET_H2_OMEGA0 = 5.0e-12
 TARGET_OMEGA0 = TARGET_H2_OMEGA0 / ((H0_BLIP / H100) ** 2)
@@ -51,7 +52,7 @@ def build_iso_only_config():
 
         fmin=4e-4
         fmax=3e-3
-        duration=2e6
+        duration={OBSERVATION_DURATION_SECONDS}
         seglen=1e5
         fs=0.25
         Shfile=LISA_2017_PSD_M.npy
@@ -63,7 +64,7 @@ def build_iso_only_config():
         load_data=0
         datafile=mldc_tdi_withnoise.txt
         datatype=strain
-        ## Reference frequency fixed to 25 mHz as requested for the paper benchmark.
+        ## Reference frequency fixed to 2.5 mHz as requested for the paper benchmark.
         fref = {LISA_FREF:.1e}
 
         model=noise+powerlaw_isgwb
@@ -78,7 +79,7 @@ def build_iso_only_config():
         injection=noise+powerlaw_fixedmultipoles
 
         ## Injection benchmark:
-        ## log10(h^2 Omega_GW) = -11.30 at 25 mHz, mapped to BLIP's plain Omega convention.
+        ## log10(h^2 Omega_GW) = -11.30 at 2.5 mHz, mapped to BLIP's plain Omega convention.
         ## The anisotropic power satisfies (2L+1) A_L = 0.07 Omega_0 for every L=1..10,
         ## so the summed anisotropic power is 0.7 Omega_0 across the ten injected multipoles.
         truevals = {{'noise':{{'Np':9e-42,'Na':3.6e-49}},
@@ -121,11 +122,12 @@ def build_iso_plus_one_config(multipole_l):
     return textwrap.dedent(
         f"""\
         [params]
-        ## Reuse one shared all-multipole absolute-amplitude dataset and recover only L=0 plus L={multipole_l}.
+        ## Reuse one shared all-multipole absolute-amplitude dataset and recover only L=0 plus L={multipole_l}
+        ## with one shared spectral slope and monopole normalization.
 
         fmin=4e-4
         fmax=3e-3
-        duration=2e6
+        duration={OBSERVATION_DURATION_SECONDS}
         seglen=1e5
         fs=0.25
         Shfile=LISA_2017_PSD_M.npy
@@ -139,12 +141,11 @@ def build_iso_plus_one_config(multipole_l):
         datatype=strain
         fref = {LISA_FREF:.1e}
 
-        model=noise+powerlaw_isgwb+powerlaw_multipole
-        alias={{'powerlaw_isgwb':'powerlaw_fixedmultipoles',
-                'powerlaw_multipole':'powerlaw_fixedmultipoles'}}
+        model=noise+powerlaw_fixedmultipoles
+        alias={{}}
 
         lmax = 10
-        multipole_l = {multipole_l}
+        absolute_multipole_ls = [{multipole_l}]
 
 
         [inj]
