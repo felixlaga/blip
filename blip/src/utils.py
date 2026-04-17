@@ -56,8 +56,7 @@ def gen_suffixes(names):
                  'isgwb':{'abbrv':'I','count':1},
                  'sph':{'abbrv':'A','count':1},
                  'multipole':{'abbrv':'L','count':1},
-                 'fixedmultipoles':{'abbrv':'F','count':1},
-                 'multipoles':{'abbrv':'M','count':1},
+                 'relmultipole':{'abbrv':'R','count':1},
                  'population':{'abbrv':'P','count':1},
                  'hierarchical':{'abbrv':'H','count':1} }
     

@@ -320,10 +320,9 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.inj_response_mat = self.response_mat
         
         ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
-        ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
+        ## a_L = A_L / A_0 for one chosen L. It does not reconstruct a sky map.
         elif self.spatial_model_name == 'relmultipole':
             self.multipole_l = self.get_selected_multipole_l()
-            self.relative_multipole_ls = [self.multipole_l]
             self.relative_multipole_start = len(self.spectral_parameters)
             self.spatial_parameters = self.spatial_parameters + [
                 self.get_single_relative_multipole_amplitude_parameter()
@@ -367,109 +366,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.truevals[self.spatial_parameters[0]] = injected_log_amplitude
                 self.inj_response_mat = self.compute_single_relative_multipole_response(injected_log_amplitude)
 
-        ## This mode keeps one shared isotropic spectrum and samples absolute total-power amplitudes
-        ## A_L for every selected L >= 1, alongside the monopole amplitude Omega_0.
-        elif self.spatial_model_name == 'fixedmultipoles':
-            self.absolute_multipole_ls = self.get_absolute_multipole_ls()
-            self.absolute_multipole_start = len(self.spectral_parameters)
-            self.spatial_parameters = self.spatial_parameters + [
-                self.get_absolute_multipole_amplitude_parameter(lval) for lval in self.absolute_multipole_ls
-            ]
-
-            if self.params['tdi_lev'] == 'michelson':
-                self.isotropic_response = self.isgwb_mich_response
-                self.anisotropic_response = self.asgwb_mich_response
-            elif self.params['tdi_lev'] == 'xyz':
-                self.isotropic_response = self.isgwb_xyz_response
-                self.anisotropic_response = self.asgwb_xyz_response
-            elif self.params['tdi_lev'] == 'aet':
-                self.isotropic_response = self.isgwb_aet_response
-                self.anisotropic_response = self.asgwb_aet_response
-            else:
-                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
-
-            self.response_mat, self.absolute_response_mats = self.compute_multipole_response_bank(
-                f0,
-                tsegmid,
-                self.absolute_multipole_ls,
-            )
-
-            max_l = max(self.absolute_multipole_ls)
-            if self.absolute_multipole_ls == list(range(1, max_l + 1)):
-                self.fancyname = "Absolute Multipoles $L\\leq{}$ ".format(max_l) + self.fancyname
-                self.subscript = "_{\\mathrm{F\\leq" + str(max_l) + "}}"
-            else:
-                ls_label = ",".join([str(lval) for lval in self.absolute_multipole_ls])
-                self.fancyname = "Absolute Multipoles (L={}) ".format(ls_label) + self.fancyname
-                self.subscript = "_{\\mathrm{F=" + ls_label + "}}"
-            self.color = 'royalblue'
-            self.has_map = False
-
-            if not injection:
-                self.prior = self.fixedmultipoles_prior
-                self.cov = self.compute_cov_fixedmultipoles
-            else:
-                injected_log_amplitudes = self.get_injected_absolute_multipole_log_amplitudes()
-                for parameter_name, parameter_value in zip(self.spatial_parameters, injected_log_amplitudes):
-                    self.truevals[parameter_name] = parameter_value
-                self.inj_response_mat = self.compute_fixed_multipole_response(
-                    self.injvals['log_omega0'],
-                    injected_log_amplitudes,
-                )
-
-        ## This mode keeps one shared isotropic spectrum and samples non-negative relative multipole amplitudes
-        ## a_L = A_L / A_0 for every L = 1..lmax. It does not reconstruct a sky map.
-        elif self.spatial_model_name == 'multipoles':
-            if injection:
-                self.relative_multipole_ls = list(range(1, int(self.inj['inj_lmax']) + 1))
-            else:
-                self.relative_multipole_ls = self.get_relative_multipole_ls()
-            self.multipole_lmax = max(self.relative_multipole_ls)
-            if self.multipole_lmax < 1:
-                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
-
-            self.relative_multipole_start = len(self.spectral_parameters)
-            self.spatial_parameters = self.spatial_parameters + [
-                self.get_relative_multipole_amplitude_parameter(lval) for lval in self.relative_multipole_ls
-            ]
-            
-            if self.params['tdi_lev'] == 'michelson':
-                self.isotropic_response = self.isgwb_mich_response
-                self.anisotropic_response = self.asgwb_mich_response
-            elif self.params['tdi_lev'] == 'xyz':
-                self.isotropic_response = self.isgwb_xyz_response
-                self.anisotropic_response = self.asgwb_xyz_response
-            elif self.params['tdi_lev'] == 'aet':
-                self.isotropic_response = self.isgwb_aet_response
-                self.anisotropic_response = self.asgwb_aet_response
-            else:
-                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
-            
-            self.response_mat, self.relative_response_mats = self.compute_multipole_response_bank(
-                f0,
-                tsegmid,
-                self.relative_multipole_ls,
-            )
-
-            if self.relative_multipole_ls == list(range(1, self.multipole_lmax + 1)):
-                self.fancyname = "Relative Multipoles $L\\leq{}$ ".format(self.multipole_lmax) + self.fancyname
-                self.subscript = "_{\\mathrm{L\\leq" + str(self.multipole_lmax) + "}}"
-            else:
-                ls_label = ",".join([str(lval) for lval in self.relative_multipole_ls])
-                self.fancyname = "Relative Multipoles (L={}) ".format(ls_label) + self.fancyname
-                self.subscript = "_{\\mathrm{L=" + ls_label + "}}"
-            self.color = 'royalblue'
-            self.has_map = False
-            
-            if not injection:
-                self.prior = self.multipoles_prior
-                self.cov = self.compute_cov_multipoles
-            else:
-                injected_log_amplitudes = self.get_injected_relative_multipole_log_amplitudes()
-                for parameter_name, parameter_value in zip(self.spatial_parameters, injected_log_amplitudes):
-                    self.truevals[parameter_name] = parameter_value
-                self.inj_response_mat = self.compute_relative_multipole_response(injected_log_amplitudes)
-        
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
             
@@ -751,122 +647,26 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         return [(multipole_l, mval) for mval in range(-multipole_l, multipole_l + 1)]
 
-    def get_relative_multipole_ls(self):
+    def get_single_relative_multipole_prior_value(self,key):
         '''
-        Return the ordered multipoles to include in the relative-multipole model.
-        '''
-        configured_ls = self.params.get('relative_multipole_ls', None)
-        if configured_ls is None:
-            multipole_lmax = int(self.params['lmax'])
-            if multipole_lmax < 1:
-                raise ValueError("The relative multipole-spectrum model requires lmax >= 1.")
-            relative_multipole_ls = list(range(1, multipole_lmax + 1))
-        else:
-            relative_multipole_ls = sorted(list(dict.fromkeys([int(value) for value in configured_ls])))
-            if len(relative_multipole_ls) == 0:
-                raise ValueError("The relative multipole-spectrum model requires at least one selected multipole.")
-            if np.any([value < 1 for value in relative_multipole_ls]):
-                raise ValueError("All selected relative multipoles must satisfy L >= 1.")
-
-        return relative_multipole_ls
-
-    def get_absolute_multipole_ls(self):
-        '''
-        Return the ordered multipoles to include in the absolute fixed-multipole model.
-        '''
-        configured_ls = self.params.get('absolute_multipole_ls', None)
-        if configured_ls is None:
-            multipole_lmax = int(self.params['lmax'])
-            if multipole_lmax < 1:
-                raise ValueError("The absolute fixed-multipole model requires lmax >= 1.")
-            absolute_multipole_ls = list(range(1, multipole_lmax + 1))
-        else:
-            absolute_multipole_ls = sorted(list(dict.fromkeys([int(value) for value in configured_ls])))
-            if len(absolute_multipole_ls) == 0:
-                raise ValueError("The absolute fixed-multipole model requires at least one selected multipole.")
-            if np.any([value < 1 for value in absolute_multipole_ls]):
-                raise ValueError("All selected absolute multipoles must satisfy L >= 1.")
-
-        return absolute_multipole_ls
-
-    def parse_relative_multipole_truths(self):
-        '''
-        Parse injected relative multipole amplitudes for the total-power model.
-        '''
-        if 'A_ratios' in self.injvals:
-            raw_ratios = self.injvals['A_ratios']
-            ratios_are_logged = False
-        elif 'log_A_ratios' in self.injvals:
-            raw_ratios = self.injvals['log_A_ratios']
-            ratios_are_logged = True
-        else:
-            raise ValueError(
-                "Injected 'powerlaw_multipoles' components must provide either 'A_ratios' or 'log_A_ratios'."
-            )
-
-        if isinstance(raw_ratios, dict):
-            keyed_values = {int(key): value for key, value in raw_ratios.items()}
-            relative_multipole_ls = sorted(list(dict.fromkeys([int(key) for key in keyed_values.keys()])))
-            raw_values = [keyed_values[key] for key in relative_multipole_ls]
-        else:
-            raw_values = list(raw_ratios)
-            relative_multipole_ls = list(range(1, len(raw_values) + 1))
-
-        if len(relative_multipole_ls) == 0:
-            raise ValueError("Injected relative multipoles must include at least one L >= 1 term.")
-        if np.any([value < 1 for value in relative_multipole_ls]):
-            raise ValueError("Injected relative multipole keys must satisfy L >= 1.")
-
-        log_A_ratios = []
-        for multipole_l, raw_value in zip(relative_multipole_ls, raw_values):
-            if ratios_are_logged:
-                log_A_ratio = float(raw_value)
-            else:
-                ratio = float(raw_value)
-                if ratio <= 0:
-                    raise ValueError(
-                        "Injected relative multipole A_{}/A_0 must be strictly positive. "
-                        "Omit a multipole from 'A_ratios' instead of setting it to zero.".format(multipole_l)
-                    )
-                log_A_ratio = float(np.log10(ratio))
-            log_A_ratios.append(log_A_ratio)
-
-        return relative_multipole_ls, np.asarray(log_A_ratios, dtype=float)
-    
-    def get_relative_multipole_amplitude_parameter(self,multipole_l):
-        '''
-        Parameter label for a relative multipole amplitude A_L / A_0.
-        '''
-        return r'$\log_{10} (A_{' + str(multipole_l) + '}/A_0)$'
-
-    def get_absolute_multipole_amplitude_parameter(self,multipole_l):
-        '''
-        Parameter label for an absolute fixed-multipole amplitude A_L.
-        '''
-        return r'$\log_{10} (A_{' + str(multipole_l) + '})$'
-
-    def get_relative_multipole_prior_array(self,key):
-        '''
-        Return a per-selected-multipole array for a relative-multipole prior hyperparameter.
+        Return a scalar prior hyperparameter for the single-relative-multipole model.
         '''
         values = self.params.get(key, None)
         if values is None:
             return None
 
         if np.isscalar(values):
-            return np.full(len(self.relative_multipole_ls), float(values), dtype=float)
+            return float(values)
 
         values = np.asarray(values, dtype=float)
         if values.ndim != 1:
-            raise ValueError("Relative multipole prior hyperparameter '{}' must be scalar or 1D.".format(key))
-        if values.size == 1:
-            return np.full(len(self.relative_multipole_ls), float(values[0]), dtype=float)
-        if values.size != len(self.relative_multipole_ls):
+            raise ValueError("Single-relative-multipole prior hyperparameter '{}' must be scalar or 1D.".format(key))
+        if values.size != 1:
             raise ValueError(
-                "Relative multipole prior hyperparameter '{}' expected {} values, got {}."
-                .format(key, len(self.relative_multipole_ls), values.size)
+                "Single-relative-multipole prior hyperparameter '{}' expected exactly one value, got {}."
+                .format(key, values.size)
             )
-        return values
+        return float(values[0])
 
     def get_injected_single_relative_multipole_log_amplitude(self):
         '''
@@ -879,108 +679,10 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             if ratio <= 0:
                 raise ValueError("Injected single relative multipole A_L/A_0 must be > 0.")
             return float(np.log10(ratio))
+        raise ValueError(
+            "Injected 'powerlaw_relmultipole' components must provide either 'A_ratio' or 'log_A_ratio'."
+        )
 
-        relative_multipole_ls, log_A_ratios = self.parse_relative_multipole_truths()
-        if self.multipole_l not in relative_multipole_ls:
-            raise ValueError(
-                "Injected relative multipole truths do not include the selected multipole L={}."
-                .format(self.multipole_l)
-            )
-        relative_index = relative_multipole_ls.index(self.multipole_l)
-        return float(log_A_ratios[relative_index])
-
-    def get_injected_relative_multipole_log_amplitudes(self):
-        '''
-        Return the injected log10(A_L / A_0) values for L=1..multipole_lmax.
-
-        The injection config may specify either linear amplitudes via
-        ``A_ratios`` or log-amplitudes via ``log_A_ratios``.
-        '''
-        if 'log_A_ratios' in self.injvals:
-            log_amplitudes = np.asarray(self.injvals['log_A_ratios'], dtype=float)
-        elif 'A_ratios' in self.injvals:
-            amplitudes = np.asarray(self.injvals['A_ratios'], dtype=float)
-            if np.any(amplitudes <= 0):
-                raise ValueError("Injected multipole ratios in 'A_ratios' must all be > 0.")
-            log_amplitudes = np.log10(amplitudes)
-        else:
-            raise ValueError(
-                "The relative multipole-spectrum injection requires either "
-                "'A_ratios' or 'log_A_ratios' in the truevals dictionary."
-            )
-
-        expected_shape = (len(self.relative_multipole_ls),)
-        if log_amplitudes.shape != expected_shape:
-            raise ValueError(
-                "Expected {} injected relative multipole amplitudes, got {}."
-                .format(len(self.relative_multipole_ls), log_amplitudes.size)
-            )
-
-        return log_amplitudes
-
-    def get_injected_absolute_multipole_log_amplitudes(self):
-        '''
-        Return the injected log10(A_L) values for the selected absolute fixed multipoles.
-        '''
-        if 'log_A_ls' in self.injvals:
-            raw_values = self.injvals['log_A_ls']
-            values_are_logged = True
-        elif 'A_ls' in self.injvals:
-            raw_values = self.injvals['A_ls']
-            values_are_logged = False
-        elif ('log_A_ratios' in self.injvals) or ('A_ratios' in self.injvals):
-            if 'log_omega0' not in self.injvals:
-                raise ValueError(
-                    "Injected absolute multipoles derived from A_ratios require a monopole 'omega0' truth."
-                )
-            relative_multipole_ls, log_A_ratios = self.parse_relative_multipole_truths()
-            log_omega0 = float(self.injvals['log_omega0'])
-            lookup = {lval: log_omega0 + log_ratio for lval, log_ratio in zip(relative_multipole_ls, log_A_ratios)}
-            return np.asarray([lookup[lval] for lval in self.absolute_multipole_ls], dtype=float)
-        elif ('log_A_L' in self.injvals) or ('A_L' in self.injvals):
-            if len(self.absolute_multipole_ls) != 1:
-                raise ValueError(
-                    "A single injected A_L value can only seed an absolute fixed-multipole model with one selected L."
-                )
-            if 'log_A_L' in self.injvals:
-                return np.asarray([float(self.injvals['log_A_L'])], dtype=float)
-            amplitude = float(self.injvals['A_L'])
-            if amplitude <= 0:
-                raise ValueError("Injected A_L must be strictly positive.")
-            return np.asarray([float(np.log10(amplitude))], dtype=float)
-        else:
-            raise ValueError(
-                "Injected absolute fixed multipoles require one of 'A_ls', 'log_A_ls', 'A_ratios', 'log_A_ratios', or 'A_L'."
-            )
-
-        if isinstance(raw_values, dict):
-            keyed_values = {int(key): value for key, value in raw_values.items()}
-            missing_ls = [lval for lval in self.absolute_multipole_ls if lval not in keyed_values]
-            if len(missing_ls) > 0:
-                raise ValueError(
-                    "Injected absolute fixed multipoles are missing values for L={}.".format(missing_ls)
-                )
-            ordered_values = [keyed_values[lval] for lval in self.absolute_multipole_ls]
-        else:
-            ordered_values = list(raw_values)
-            if len(ordered_values) != len(self.absolute_multipole_ls):
-                raise ValueError(
-                    "Expected {} injected absolute fixed multipoles, got {}."
-                    .format(len(self.absolute_multipole_ls), len(ordered_values))
-                )
-
-        log_amplitudes = []
-        for raw_value in ordered_values:
-            if values_are_logged:
-                log_amplitudes.append(float(raw_value))
-            else:
-                amplitude = float(raw_value)
-                if amplitude <= 0:
-                    raise ValueError("Injected absolute multipole amplitudes must all be > 0.")
-                log_amplitudes.append(float(np.log10(amplitude)))
-
-        return np.asarray(log_amplitudes, dtype=float)
-    
     def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
         '''
         Build a statistically isotropic covariance response for the total power in one fixed multipole L.
@@ -1003,55 +705,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         return effective_response_sq
     
-    def compute_multipole_response_bank(self,f0,tsegmid,multipole_ls):
-        '''
-        Build the isotropic response plus one effective total-power response for each selected multipole.
-        '''
-        if np.isscalar(multipole_ls):
-            multipole_ls = list(range(1, int(multipole_ls) + 1))
-        else:
-            multipole_ls = [int(value) for value in multipole_ls]
-
-        isotropic_response_mat = self.isotropic_response(f0,tsegmid)
-        multipole_responses = []
-        for multipole_l in multipole_ls:
-            response_basis = self.anisotropic_response(
-                f0,
-                tsegmid,
-                set_almax=multipole_l,
-                set_lm_pairs=self.get_single_multipole_lm_pairs(multipole_l),
-            )
-            multipole_responses.append(
-                self.compute_single_multipole_response(response_basis,multipole_l,basis_already_selected=True)
-            )
-        return isotropic_response_mat, np.stack(multipole_responses, axis=-1)
-    
-    def compute_relative_multipole_response(self,log10_relative_amplitudes):
-        '''
-        Combine the isotropic response with the effective relative multipole responses.
-        '''
-        log10_relative_amplitudes = np.asarray(log10_relative_amplitudes,dtype=float)
-        if log10_relative_amplitudes.shape != (len(self.relative_multipole_ls),):
-            raise ValueError(
-                "Expected {} relative multipole amplitudes, got {}.".format(
-                    len(self.relative_multipole_ls),
-                    log10_relative_amplitudes.size,
-                )
-            )
-        
-        combined_response_mat = np.array(self.response_mat, copy=True)
-        relative_weights = 10**log10_relative_amplitudes
-        combined_response_mat = combined_response_mat + np.tensordot(
-            self.relative_response_mats,
-            relative_weights,
-            axes=([4],[0]),
-        )
-        combined_response_mat = 0.5 * (
-            combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
-        )
-        
-        return combined_response_mat
-
     def compute_single_relative_multipole_response(self,log10_relative_amplitude):
         '''
         Combine the isotropic response with one selected relative multipole A_L / A_0.
@@ -1065,32 +718,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         combined_response_mat = np.array(self.response_mat, copy=True)
         combined_response_mat = combined_response_mat + (10**log10_relative_amplitude[0]) * self.relative_response_mat
-        combined_response_mat = 0.5 * (
-            combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
-        )
-
-        return combined_response_mat
-
-    def compute_fixed_multipole_response(self,log10_omega0,log10_absolute_amplitudes):
-        '''
-        Combine the isotropic monopole with absolute fixed-multipole amplitudes A_L.
-        '''
-        log10_absolute_amplitudes = np.asarray(log10_absolute_amplitudes,dtype=float)
-        if log10_absolute_amplitudes.shape != (len(self.absolute_multipole_ls),):
-            raise ValueError(
-                "Expected {} absolute fixed multipole amplitudes, got {}.".format(
-                    len(self.absolute_multipole_ls),
-                    log10_absolute_amplitudes.size,
-                )
-            )
-
-        combined_response_mat = np.array(self.response_mat, copy=True)
-        relative_weights = 10**(log10_absolute_amplitudes - float(log10_omega0))
-        combined_response_mat = combined_response_mat + np.tensordot(
-            self.absolute_response_mats,
-            relative_weights,
-            axes=([4],[0]),
-        )
         combined_response_mat = 0.5 * (
             combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
         )
@@ -1169,50 +796,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         return spectral_theta+sph_theta
     
-    def multipoles_prior(self,theta):
-        '''
-        Prior transform for the relative multipole-spectrum model.
-        '''
-        spectral_theta = self.spectral_prior(theta[:self.relative_multipole_start])
-        prior_kind = str(self.params.get('log_A_ratio_prior', 'uniform')).lower()
-        unit_spatial_theta = theta[self.relative_multipole_start:]
-
-        if prior_kind in ['uniform', 'flat']:
-            spatial_theta = [
-                self.rescale_uniform_prior(unit_theta,'log_A_ratio',[-6,6])
-                for unit_theta in unit_spatial_theta
-            ]
-        elif prior_kind in ['truncnorm', 'truncated_normal', 'truncated-normal']:
-            means = self.get_relative_multipole_prior_array('log_A_ratio_mean')
-            sigmas = self.get_relative_multipole_prior_array('log_A_ratio_sigma')
-            if means is None or sigmas is None:
-                raise ValueError(
-                    "The truncated-normal log_A_ratio prior requires both 'log_A_ratio_mean' "
-                    "and 'log_A_ratio_sigma' to be specified."
-                )
-            spatial_theta = [
-                self.rescale_truncated_normal_prior(unit_theta, mean, sigma, 'log_A_ratio', [-6,6])
-                for unit_theta, mean, sigma in zip(unit_spatial_theta, means, sigmas)
-            ]
-        else:
-            raise ValueError(
-                "Unknown log_A_ratio prior '{}'. Supported values are 'uniform' and 'truncnorm'.".format(
-                    prior_kind
-                )
-            )
-        return spectral_theta + spatial_theta
-
-    def fixedmultipoles_prior(self,theta):
-        '''
-        Prior transform for the shared-spectrum, absolute fixed-multipole model.
-        '''
-        spectral_theta = self.spectral_prior(theta[:self.absolute_multipole_start])
-        spatial_theta = [
-            self.rescale_uniform_prior(unit_theta,'log_A_L',[-14,8])
-            for unit_theta in theta[self.absolute_multipole_start:]
-        ]
-        return spectral_theta + spatial_theta
-
     def single_relative_multipole_prior(self,theta):
         '''
         Prior transform for the shared-spectrum isotropic + fixed relative-multipole model.
@@ -1231,15 +814,15 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.rescale_uniform_prior(unit_spatial_theta[0], 'log_A_ratio', [-6,6])
             ]
         elif prior_kind in ['truncnorm', 'truncated_normal', 'truncated-normal']:
-            means = self.get_relative_multipole_prior_array('log_A_ratio_mean')
-            sigmas = self.get_relative_multipole_prior_array('log_A_ratio_sigma')
-            if means is None or sigmas is None:
+            mean = self.get_single_relative_multipole_prior_value('log_A_ratio_mean')
+            sigma = self.get_single_relative_multipole_prior_value('log_A_ratio_sigma')
+            if mean is None or sigma is None:
                 raise ValueError(
                     "The truncated-normal log_A_ratio prior requires both 'log_A_ratio_mean' "
                     "and 'log_A_ratio_sigma' to be specified."
                 )
             spatial_theta = [
-                self.rescale_truncated_normal_prior(unit_spatial_theta[0], means[0], sigmas[0], 'log_A_ratio', [-6,6])
+                self.rescale_truncated_normal_prior(unit_spatial_theta[0], mean, sigma, 'log_A_ratio', [-6,6])
             ]
         else:
             raise ValueError(
@@ -1464,31 +1047,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         
         return cov_sgwb
     
-    def compute_cov_multipoles(self,theta):
-        '''
-        Compute the covariance from the shared-spectrum, relative-multipole model.
-        '''
-        spectral_theta = theta[:self.relative_multipole_start]
-        spatial_theta = theta[self.relative_multipole_start:]
-        Sgw = self.compute_Sgw(self.fs,spectral_theta)
-        cov_sgwb = Sgw[None, None, :, None] * self.compute_relative_multipole_response(spatial_theta)
-        
-        return cov_sgwb
-
-    def compute_cov_fixedmultipoles(self,theta):
-        '''
-        Compute the covariance from the shared-spectrum, absolute fixed-multipole model.
-        '''
-        spectral_theta = theta[:self.absolute_multipole_start]
-        spatial_theta = theta[self.absolute_multipole_start:]
-        Sgw = self.compute_Sgw(self.fs,spectral_theta)
-        cov_sgwb = Sgw[None, None, :, None] * self.compute_fixed_multipole_response(
-            spectral_theta[1],
-            spatial_theta,
-        )
-
-        return cov_sgwb
-
     def compute_cov_single_relative_multipole(self,theta):
         '''
         Compute the covariance from the shared-spectrum isotropic + fixed relative-multipole model.
@@ -1562,10 +1120,6 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             return self.compute_summed_response(self.compute_skymap_alms(theta[self.blm_start:]))
         if self.spatial_model_name == 'relmultipole':
             return self.compute_single_relative_multipole_response(theta[self.relative_multipole_start:])
-        if self.spatial_model_name == 'fixedmultipoles':
-            return self.compute_fixed_multipole_response(theta[1], theta[self.absolute_multipole_start:])
-        if self.spatial_model_name == 'multipoles':
-            return self.compute_relative_multipole_response(theta[self.relative_multipole_start:])
         return self.response_mat
     
     def compute_angular_power_spectrum(self,alms,lmax=None,relative_to_l0=False):
@@ -1667,15 +1221,11 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             print("Attempted to recompute response matrix, but there is already an attached response matrix at these times and frequencies. Returning the original...")
             return self.response_mat
         else:
-            if self.spatial_model_name == 'multipoles':
+            if self.spatial_model_name == 'relmultipole':
                 raise NotImplementedError(
-                    "The multipole-spectrum model stores both isotropic and per-L effective responses. "
-                    "Recompute those via compute_multipole_response_bank(...) and combine them with compute_relative_multipole_response(...)."
-                )
-            if self.spatial_model_name == 'fixedmultipoles':
-                raise NotImplementedError(
-                    "The absolute fixed-multipole model stores both isotropic and per-L effective responses. "
-                    "Recompute those via compute_multipole_response_bank(...) and combine them with compute_fixed_multipole_response(...)."
+                    "The single-relative-multipole model depends on the sampled A_L/A_0 weight. "
+                    "Rebuild its isotropic and fixed-L responses together and combine them with "
+                    "compute_single_relative_multipole_response(...)."
                 )
             response_mat = self.response(f0,tsegmid,**self.response_kwargs)
             if self.spatial_model_name == 'multipole':
