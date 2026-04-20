@@ -366,6 +366,57 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 self.truevals[self.spatial_parameters[0]] = injected_log_amplitude
                 self.inj_response_mat = self.compute_single_relative_multipole_response(injected_log_amplitude)
 
+        ## This mode generalizes the shared-spectrum relative-multipole model to multiple fixed L values.
+        ## It samples one shared isotropic spectrum together with a set of non-negative relative multipole
+        ## amplitudes A_L / A_0, but does not reconstruct any individual m-modes or sky maps.
+        elif self.spatial_model_name == 'relmultipoles':
+            self.multipole_ls = self.get_selected_relative_multipole_ls()
+            self.relative_multipole_start = len(self.spectral_parameters)
+            self.spatial_parameters = self.spatial_parameters + self.get_relative_multipole_amplitude_parameters(self.multipole_ls)
+
+            if self.params['tdi_lev'] == 'michelson':
+                self.isotropic_response = self.isgwb_mich_response
+                self.anisotropic_response = self.asgwb_mich_response
+            elif self.params['tdi_lev'] == 'xyz':
+                self.isotropic_response = self.isgwb_xyz_response
+                self.anisotropic_response = self.asgwb_xyz_response
+            elif self.params['tdi_lev'] == 'aet':
+                self.isotropic_response = self.isgwb_aet_response
+                self.anisotropic_response = self.asgwb_aet_response
+            else:
+                raise ValueError("Invalid specification of tdi_lev. Can be 'michelson', 'xyz', or 'aet'.")
+
+            self.response_mat = self.isotropic_response(f0,tsegmid)
+            self.relative_response_mats = []
+            for multipole_l in self.multipole_ls:
+                relative_response_basis = self.anisotropic_response(
+                    f0,
+                    tsegmid,
+                    set_almax=multipole_l,
+                    set_lm_pairs=self.get_single_multipole_lm_pairs(multipole_l),
+                )
+                self.relative_response_mats.append(
+                    self.compute_single_multipole_response(
+                        relative_response_basis,
+                        multipole_l,
+                        basis_already_selected=True,
+                    )
+                )
+
+            self.fancyname = "Isotropic + Relative Multipoles {} ".format(self.multipole_ls) + self.fancyname
+            self.subscript = "_{\\mathrm{I+L=" + ','.join([str(multipole_l) for multipole_l in self.multipole_ls]) + "}}"
+            self.color = 'royalblue'
+            self.has_map = False
+
+            if not injection:
+                self.prior = self.relative_multipoles_prior
+                self.cov = self.compute_cov_relative_multipoles
+            else:
+                injected_log_amplitudes = self.get_injected_relative_multipole_log_amplitudes(self.multipole_ls)
+                for parameter_name, parameter_value in zip(self.spatial_parameters, injected_log_amplitudes):
+                    self.truevals[parameter_name] = parameter_value
+                self.inj_response_mat = self.compute_relative_multipoles_response(injected_log_amplitudes)
+
         ## Handle all the astrophysical spatial distributions together due to their similarities
         elif self.spatial_model_name in ['galaxy','dwarfgalaxy','lmc','pointsource','twopoints','population']:
             
@@ -622,7 +673,43 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             raise ValueError("The single-multipole total-power mode requires 'multipole_l' >= 0 in the ini file.")
         
         return multipole_l
-    
+
+    def get_selected_relative_multipole_ls(self):
+        '''
+        Return the ordered list of relative multipoles to include in the shared-spectrum multi-L mode.
+        '''
+        if self.injection:
+            multipole_ls = self.inj.get('multipole_ls', self.params.get('multipole_ls', None))
+            fallback_l = self.inj.get('multipole_l', self.params.get('multipole_l', -1))
+        else:
+            multipole_ls = self.params.get('multipole_ls', None)
+            fallback_l = self.params.get('multipole_l', -1)
+
+        if multipole_ls is None:
+            if int(fallback_l) < 0:
+                raise ValueError(
+                    "The shared-spectrum relative-multipoles mode requires either 'multipole_ls' "
+                    "or a single fallback 'multipole_l' in the ini file."
+                )
+            multipole_ls = [int(fallback_l)]
+
+        if np.isscalar(multipole_ls):
+            multipole_ls = [int(multipole_ls)]
+        else:
+            multipole_ls = [int(value) for value in multipole_ls]
+
+        if len(multipole_ls) == 0:
+            raise ValueError("At least one relative multipole must be specified.")
+        if np.any([value <= 0 for value in multipole_ls]):
+            raise ValueError("Relative multipole lists may only contain L >= 1.")
+
+        deduped_multipole_ls = []
+        for value in multipole_ls:
+            if value not in deduped_multipole_ls:
+                deduped_multipole_ls.append(value)
+
+        return deduped_multipole_ls
+
     def get_single_multipole_amplitude_parameter(self):
         '''
         Parameter label for the single-multipole total-power amplitude.
@@ -633,7 +720,19 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
         '''
         Parameter label for a single relative multipole amplitude A_L / A_0.
         '''
-        return r'$\log_{10} (A_{' + str(self.get_selected_multipole_l()) + '}/A_0)$'
+        return self.get_relative_multipole_amplitude_parameter(self.get_selected_multipole_l())
+
+    def get_relative_multipole_amplitude_parameter(self,multipole_l):
+        '''
+        Parameter label for one relative multipole amplitude A_L / A_0.
+        '''
+        return r'$\log_{10} (A_{' + str(int(multipole_l)) + '}/A_0)$'
+
+    def get_relative_multipole_amplitude_parameters(self,multipole_ls):
+        '''
+        Parameter labels for a list of relative multipole amplitudes A_L / A_0.
+        '''
+        return [self.get_relative_multipole_amplitude_parameter(multipole_l) for multipole_l in multipole_ls]
     
     def get_single_multipole_indices(self,multipole_l):
         '''
@@ -668,19 +767,113 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             )
         return float(values[0])
 
+    def get_relative_multipole_prior_values(self,key,expected_size):
+        '''
+        Return prior hyperparameters for the shared-spectrum multi-L relative-multipole model.
+
+        Scalars are broadcast to all requested multipoles. One-element sequences are also broadcast.
+        '''
+        values = self.params.get(key, None)
+        if values is None:
+            return None
+
+        if np.isscalar(values):
+            return [float(values)] * expected_size
+
+        values = np.asarray(values, dtype=float).reshape(-1)
+        if values.size == 1:
+            return [float(values[0])] * expected_size
+        if values.size != expected_size:
+            raise ValueError(
+                "Shared-spectrum relative-multipole prior hyperparameter '{}' expected {} values, got {}."
+                .format(key, expected_size, values.size)
+            )
+        return [float(value) for value in values]
+
     def get_injected_single_relative_multipole_log_amplitude(self):
         '''
         Return the injected log10(A_L / A_0) for the selected fixed multipole.
         '''
-        if 'log_A_ratio' in self.injvals:
-            return float(self.injvals['log_A_ratio'])
-        if 'A_ratio' in self.injvals:
+        return self.get_injected_relative_multipole_log_amplitudes([self.get_selected_multipole_l()])[0]
+
+    def get_injected_relative_multipole_log_amplitudes(self,multipole_ls):
+        '''
+        Return the injected log10(A_L / A_0) values for the requested relative multipoles.
+        '''
+        multipole_ls = [int(multipole_l) for multipole_l in multipole_ls]
+
+        if 'log_A_ratio' in self.injvals or 'A_ratio' in self.injvals:
+            if len(multipole_ls) != 1:
+                raise ValueError(
+                    "Injected scalar 'A_ratio' or 'log_A_ratio' can only be used when exactly one multipole is requested."
+                )
+            if 'log_A_ratio' in self.injvals:
+                return [float(self.injvals['log_A_ratio'])]
             ratio = float(self.injvals['A_ratio'])
             if ratio <= 0:
                 raise ValueError("Injected single relative multipole A_L/A_0 must be > 0.")
-            return float(np.log10(ratio))
+            return [float(np.log10(ratio))]
+
+        if 'log_A_ratios' in self.injvals or 'A_ratios' in self.injvals:
+            if 'log_A_ratios' in self.injvals:
+                ratios = np.asarray(self.injvals['log_A_ratios'], dtype=float).reshape(-1)
+            else:
+                raw_ratios = np.asarray(self.injvals['A_ratios'], dtype=float).reshape(-1)
+                if np.any(raw_ratios <= 0):
+                    raise ValueError("Injected shared-spectrum relative multipole A_L/A_0 values must all be > 0.")
+                ratios = np.log10(raw_ratios)
+            if ratios.size != len(multipole_ls):
+                raise ValueError(
+                    "Injected shared-spectrum relative multipole list has length {}, expected {}."
+                    .format(ratios.size, len(multipole_ls))
+                )
+            return [float(value) for value in ratios]
+
+        dict_key = None
+        use_log_values = True
+        if 'log_A_ratio_by_L' in self.injvals:
+            dict_key = 'log_A_ratio_by_L'
+            use_log_values = True
+        elif 'A_ratio_by_L' in self.injvals:
+            dict_key = 'A_ratio_by_L'
+            use_log_values = False
+
+        if dict_key is not None:
+            ratio_lookup = self.injvals[dict_key]
+            normalized_lookup = {int(key): float(value) for key, value in ratio_lookup.items()}
+            missing_multipoles = [multipole_l for multipole_l in multipole_ls if multipole_l not in normalized_lookup]
+            if len(missing_multipoles) > 0:
+                raise ValueError(
+                    "Injected shared-spectrum relative multipole dictionary '{}' is missing L={}."
+                    .format(dict_key, missing_multipoles)
+                )
+            if use_log_values:
+                return [normalized_lookup[multipole_l] for multipole_l in multipole_ls]
+
+            raw_ratios = np.asarray([normalized_lookup[multipole_l] for multipole_l in multipole_ls], dtype=float)
+            if np.any(raw_ratios <= 0):
+                raise ValueError("Injected shared-spectrum relative multipole A_L/A_0 values must all be > 0.")
+            return [float(value) for value in np.log10(raw_ratios)]
+
+        individual_log_values = []
+        if np.all(['log_A_ratio_{}'.format(multipole_l) in self.injvals for multipole_l in multipole_ls]):
+            for multipole_l in multipole_ls:
+                individual_log_values.append(float(self.injvals['log_A_ratio_{}'.format(multipole_l)]))
+            return individual_log_values
+
+        if np.all(['A_ratio_{}'.format(multipole_l) in self.injvals for multipole_l in multipole_ls]):
+            raw_ratios = np.asarray(
+                [self.injvals['A_ratio_{}'.format(multipole_l)] for multipole_l in multipole_ls],
+                dtype=float,
+            )
+            if np.any(raw_ratios <= 0):
+                raise ValueError("Injected shared-spectrum relative multipole A_L/A_0 values must all be > 0.")
+            return [float(value) for value in np.log10(raw_ratios)]
+
         raise ValueError(
-            "Injected 'powerlaw_relmultipole' components must provide either 'A_ratio' or 'log_A_ratio'."
+            "Injected 'powerlaw_relmultipole' or 'powerlaw_relmultipoles' components must provide one of "
+            "'log_A_ratio', 'A_ratio', 'log_A_ratios', 'A_ratios', 'log_A_ratio_by_L', 'A_ratio_by_L', "
+            "or per-L keys like 'log_A_ratio_2'."
         )
 
     def compute_single_multipole_response(self,response_basis_mat,multipole_l,basis_already_selected=False):
@@ -716,8 +909,30 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 .format(log10_relative_amplitude.size)
             )
 
+        return self.compute_relative_multipoles_response(log10_relative_amplitude)
+
+    def compute_relative_multipoles_response(self,log10_relative_amplitudes):
+        '''
+        Combine the isotropic response with one or more selected relative multipole amplitudes A_L / A_0.
+        '''
+        log10_relative_amplitudes = np.asarray(log10_relative_amplitudes, dtype=float).reshape(-1)
+
+        if hasattr(self,'relative_response_mats'):
+            relative_response_mats = self.relative_response_mats
+        elif hasattr(self,'relative_response_mat'):
+            relative_response_mats = [self.relative_response_mat]
+        else:
+            raise AttributeError("No relative multipole response matrices are available for this submodel.")
+
+        if log10_relative_amplitudes.size != len(relative_response_mats):
+            raise ValueError(
+                "Expected {} relative multipole amplitudes, got {}."
+                .format(len(relative_response_mats), log10_relative_amplitudes.size)
+            )
+
         combined_response_mat = np.array(self.response_mat, copy=True)
-        combined_response_mat = combined_response_mat + (10**log10_relative_amplitude[0]) * self.relative_response_mat
+        for log10_relative_amplitude, relative_response_mat in zip(log10_relative_amplitudes, relative_response_mats):
+            combined_response_mat = combined_response_mat + (10**log10_relative_amplitude) * relative_response_mat
         combined_response_mat = 0.5 * (
             combined_response_mat + np.swapaxes(np.conj(combined_response_mat), 0, 1)
         )
@@ -823,6 +1038,46 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
                 )
             spatial_theta = [
                 self.rescale_truncated_normal_prior(unit_spatial_theta[0], mean, sigma, 'log_A_ratio', [-6,6])
+            ]
+        else:
+            raise ValueError(
+                "Unknown log_A_ratio prior '{}'. Supported values are 'uniform' and 'truncnorm'.".format(
+                    prior_kind
+                )
+            )
+
+        return spectral_theta + spatial_theta
+
+    def relative_multipoles_prior(self,theta):
+        '''
+        Prior transform for the shared-spectrum isotropic + multiple fixed relative multipoles model.
+        '''
+        spectral_theta = self.spectral_prior(theta[:self.relative_multipole_start])
+        prior_kind = str(self.params.get('log_A_ratio_prior', 'uniform')).lower()
+        unit_spatial_theta = theta[self.relative_multipole_start:]
+        expected_size = len(self.spatial_parameters)
+        if len(unit_spatial_theta) != expected_size:
+            raise ValueError(
+                "The shared-spectrum relative-multipoles prior expected {} spatial parameters, got {}."
+                .format(expected_size, len(unit_spatial_theta))
+            )
+
+        if prior_kind in ['uniform', 'flat']:
+            spatial_theta = [
+                self.rescale_uniform_prior(value, 'log_A_ratio', [-6,6])
+                for value in unit_spatial_theta
+            ]
+        elif prior_kind in ['truncnorm', 'truncated_normal', 'truncated-normal']:
+            means = self.get_relative_multipole_prior_values('log_A_ratio_mean', expected_size)
+            sigmas = self.get_relative_multipole_prior_values('log_A_ratio_sigma', expected_size)
+            if means is None or sigmas is None:
+                raise ValueError(
+                    "The truncated-normal log_A_ratio prior requires both 'log_A_ratio_mean' "
+                    "and 'log_A_ratio_sigma' to be specified."
+                )
+            spatial_theta = [
+                self.rescale_truncated_normal_prior(unit_value, mean, sigma, 'log_A_ratio', [-6,6])
+                for unit_value, mean, sigma in zip(unit_spatial_theta, means, sigmas)
             ]
         else:
             raise ValueError(
@@ -1058,6 +1313,17 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
 
         return cov_sgwb
 
+    def compute_cov_relative_multipoles(self,theta):
+        '''
+        Compute the covariance from the shared-spectrum isotropic + multiple fixed relative-multipole model.
+        '''
+        spectral_theta = theta[:self.relative_multipole_start]
+        spatial_theta = theta[self.relative_multipole_start:]
+        Sgw = self.compute_Sgw(self.fs,spectral_theta)
+        cov_sgwb = Sgw[None, None, :, None] * self.compute_relative_multipoles_response(spatial_theta)
+
+        return cov_sgwb
+
        
     ##########################################
     ##   Skymap and Response Calculations   ##
@@ -1120,6 +1386,8 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             return self.compute_summed_response(self.compute_skymap_alms(theta[self.blm_start:]))
         if self.spatial_model_name == 'relmultipole':
             return self.compute_single_relative_multipole_response(theta[self.relative_multipole_start:])
+        if self.spatial_model_name == 'relmultipoles':
+            return self.compute_relative_multipoles_response(theta[self.relative_multipole_start:])
         return self.response_mat
     
     def compute_angular_power_spectrum(self,alms,lmax=None,relative_to_l0=False):
@@ -1221,11 +1489,11 @@ class submodel(geometry,sph_geometry,clebschGordan,instrNoise):
             print("Attempted to recompute response matrix, but there is already an attached response matrix at these times and frequencies. Returning the original...")
             return self.response_mat
         else:
-            if self.spatial_model_name == 'relmultipole':
+            if self.spatial_model_name in ['relmultipole','relmultipoles']:
                 raise NotImplementedError(
-                    "The single-relative-multipole model depends on the sampled A_L/A_0 weight. "
-                    "Rebuild its isotropic and fixed-L responses together and combine them with "
-                    "compute_single_relative_multipole_response(...)."
+                    "The shared-spectrum relative-multipole models depend on sampled A_L/A_0 weights. "
+                    "Rebuild their isotropic and fixed-L responses together and combine them with "
+                    "compute_single_relative_multipole_response(...) or compute_relative_multipoles_response(...)."
                 )
             response_mat = self.response(f0,tsegmid,**self.response_kwargs)
             if self.spatial_model_name == 'multipole':

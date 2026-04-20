@@ -57,6 +57,7 @@ def gen_suffixes(names):
                  'sph':{'abbrv':'A','count':1},
                  'multipole':{'abbrv':'L','count':1},
                  'relmultipole':{'abbrv':'R','count':1},
+                 'relmultipoles':{'abbrv':'RM','count':1},
                  'population':{'abbrv':'P','count':1},
                  'hierarchical':{'abbrv':'H','count':1} }
     

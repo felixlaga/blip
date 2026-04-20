@@ -5,22 +5,34 @@ if REPO_ROOT not in sys.path:
 import numpy as np
 import pandas as pd
 import matplotlib
-#matplotlib.use('Agg')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerTuple
 try:
     from chainconsumer import ChainConsumer
-    from chainconsumer.chain import Chain
-    from chainconsumer.plotting.config import PlotConfig
-    from chainconsumer.statistics import SummaryStatistic
-    from chainconsumer.truth import Truth
 except ImportError:
     ChainConsumer = None
+
+try:
+    from chainconsumer.chain import Chain
+except ImportError:
     Chain = None
+
+try:
+    from chainconsumer.plotting.config import PlotConfig
+except ImportError:
     PlotConfig = None
+
+try:
+    from chainconsumer.statistics import SummaryStatistic
+except ImportError:
     SummaryStatistic = None
+
+try:
+    from chainconsumer.truth import Truth
+except ImportError:
     Truth = None
 import healpy as hp
 from healpy import Alm
@@ -43,9 +55,38 @@ def build_chainconsumer_chain(post, parameters, name='Posterior'):
     styling and a 95% max-central summary interval.
     '''
     samples = pd.DataFrame(post, columns=parameters)
+    if Chain is None or SummaryStatistic is None:
+        raise RuntimeError("Modern ChainConsumer chain construction is unavailable in this environment.")
     return Chain(samples=samples, name=name, smooth=False, kde=False,
                  statistics=SummaryStatistic.MAX_CENTRAL, summary_area=0.95,
                  sigmas=[1, 2], plot_cloud=False, bins=40)
+
+
+def chainconsumer_has_modern_api():
+    '''
+    Return True when the installed ChainConsumer exposes the newer PlotConfig/Truth API.
+    '''
+    return ChainConsumer is not None and PlotConfig is not None and SummaryStatistic is not None and Truth is not None
+
+
+def extract_bound_triplet(bound):
+    '''
+    Normalize ChainConsumer summary objects across supported API versions.
+    '''
+    if hasattr(bound, 'lower') and hasattr(bound, 'center') and hasattr(bound, 'upper'):
+        return bound.lower, bound.center, bound.upper
+
+    if isinstance(bound, (list, tuple, np.ndarray)):
+        bound = list(bound)
+        if len(bound) == 3:
+            return bound[0], bound[1], bound[2]
+        if len(bound) == 2:
+            center = 0.5 * (bound[0] + bound[1])
+            return bound[0], center, bound[1]
+        if len(bound) == 1:
+            return None, bound[0], None
+
+    return None, float(bound), None
 
 
 def format_bound_title(parameter, bound):
@@ -54,26 +95,26 @@ def format_bound_title(parameter, bound):
     '''
     label_base = parameter[:-1] if parameter.endswith('$') else parameter
     label_suffix = '$' if parameter.endswith('$') else ''
+    lower, center, upper = extract_bound_triplet(bound)
 
-    if bound.lower is None or bound.upper is None:
-        center = bound.center
+    if lower is None or upper is None:
         if np.abs(center) <= 1e-3:
             center_form = '{0:.3e}'.format(center)
         else:
             center_form = '{0:.3f}'.format(center)
         return label_base + ' = ' + center_form + label_suffix
 
-    err = [bound.upper - bound.center, bound.center - bound.lower]
+    err = [upper - center, center - lower]
 
-    if np.abs(bound.center) <= 1e-3:
-        mean_def = '{0:.3e}'.format(bound.center)
+    if np.abs(center) <= 1e-3:
+        mean_def = '{0:.3e}'.format(center)
         eidx = mean_def.find('e')
         base = float(mean_def[0:eidx])
         exponent = int(mean_def[eidx+1:])
         mean_form = str(base)
         exp_form = ' \\times ' + '10^{' + str(exponent) + '}'
     else:
-        mean_form = '{0:.3f}'.format(bound.center)
+        mean_form = '{0:.3f}'.format(center)
         exp_form = ''
 
     if np.abs(err[0]) <= 1e-2:
@@ -93,7 +134,7 @@ def collect_truevals(params, Model, Injection=None):
     '''
     Gather the injected truths that correspond to the active recovery parameters.
     '''
-    if params['load_data'] or Injection is None:
+    if Injection is None:
         return {}
 
     truevals = {}
@@ -395,7 +436,7 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
     ## the population injection looks funky with a dashed line, but we still need to make it clear that it's an injection.
     ## this makes the Notation Legend "Injection" label be a split dashed/solid line
     
-    if params['load_data']:
+    if Injection is None:
         notation_legend_elements = [Line2D([0], [0], color='k', ls='-'),
                                     Patch(color='k',alpha=0.25)]
         notation_legend_labels = ['Median Fit','$95\%$ C.I.']
@@ -461,7 +502,7 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
             plt.loglog(fs,Sgw_median,color=sm.color)
             plt.fill_between(fs.flatten(),Sgw_lower95,Sgw_upper95,alpha=0.25,color=sm.color)
 
-        if not params['load_data']:
+        if Injection is not None:
             ## plot the injected spectra, if known
             for component_name in Injection.component_names:
                 if component_name != 'noise':
@@ -552,7 +593,7 @@ def fitmaker(post,params,parameters,inj,Model,Injection=None,saveto=None,plot_co
             
         ## now make the convolved spectral fit
         
-        if not params['load_data']:
+        if Injection is not None:
             ## plot the injected spectra, if known
             for component_name in Injection.component_names:
                 ## this will overwrite the default linestyle if 'ls' is given in cm.plot_kwargs
@@ -692,16 +733,27 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
         
     ## Make chainconsumer corner plots
     cc = ChainConsumer()
-    cc.add_chain(build_chainconsumer_chain(post, all_parameters))
-    cc.set_plot_config(PlotConfig(max_ticks=2, label_font_size=18, tick_font_size=18,
-                                  spacing=2, summarise=False, dpi=200))
-    if knowTrue:
-        cc.add_truth(Truth(location=truevals, color='g', line_style='--', alpha=0.7))
-
-    fig = cc.plotter.plot(figsize=(16, 16))
+    if chainconsumer_has_modern_api():
+        cc.add_chain(build_chainconsumer_chain(post, all_parameters))
+        cc.set_plot_config(PlotConfig(max_ticks=2, label_font_size=18, tick_font_size=18,
+                                      spacing=2, summarise=False, dpi=200))
+        if knowTrue:
+            cc.add_truth(Truth(location=truevals, color='g', line_style='--', alpha=0.7))
+        fig = cc.plotter.plot(figsize=(16, 16))
+        sum_data = cc.analysis.get_summary()['Posterior']
+    else:
+        cc.add_chain(post, parameters=all_parameters, name='Posterior',
+                     smooth=False, kde=False, statistics='max_central',
+                     bins=40, cloud=False)
+        cc.configure(max_ticks=2, label_font_size=18, tick_font_size=18,
+                     spacing=2, summary=False, summary_area=0.95,
+                     sigmas=[1, 2], kde=False, smooth=False, cloud=False)
+        if knowTrue:
+            cc.configure_truth(color='g', linestyle='--', alpha=0.7)
+        fig = cc.plotter.plot(figsize=(16, 16), truth=truevals if knowTrue else None)
+        sum_data = cc.analysis.get_summary()
 
     ## make axis labels to be parameter summaries
-    sum_data = cc.analysis.get_summary()['Posterior']
     axes = np.array(fig.axes).reshape((npar, npar))
 
     # Adjust axis labels
@@ -722,9 +774,12 @@ def plotmaker(post, params,parameters, inj, Model, Injection=None,saveto=None):
     plt.close(fig)
     plot_absolute_amplitude_marginals(post, params, all_parameters, truevals=truevals, saveto=saveto)
     
-    if not params['load_data']:    
+    if not params['load_data']:
         # plot walkers
-        fig = cc.plotter.plot_walks(convolve=10)
+        if chainconsumer_has_modern_api():
+            fig = cc.plotter.plot_walks(convolve=10)
+        else:
+            fig = cc.plotter.plot_walks(convolve=10, truth=truevals if knowTrue else None)
         fig.savefig(params['out_dir'] + 'plotwalks.png', dpi=200)
         plt.close(fig)
 

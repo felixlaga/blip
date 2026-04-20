@@ -3,6 +3,8 @@
 import pickle
 import numpy as np
 import sys, os,configparser, subprocess
+import matplotlib
+matplotlib.use('Agg')
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
@@ -15,6 +17,36 @@ from blip.tools.plotmaker import fitmaker
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
 import time
+
+
+def load_reference_injection_for_postprocessing(params):
+    '''
+    Attempt to load the Injection object that generated an externally supplied
+    spectrum so postprocessing can still show truth markers and injected fits.
+    '''
+    if not params.get('load_data', False):
+        return None
+
+    input_spectrum = params.get('input_spectrum', None)
+    if input_spectrum in [None, '']:
+        return None
+
+    try:
+        spectrum_path = os.path.abspath(str(input_spectrum))
+    except Exception:
+        return None
+
+    candidate_dir = os.path.dirname(spectrum_path)
+    candidate_path = os.path.join(candidate_dir, 'injection.pickle')
+    if not os.path.exists(candidate_path):
+        return None
+
+    try:
+        with open(candidate_path, 'rb') as injectionfile:
+            return pickle.load(injectionfile)
+    except Exception as exc:
+        print("Warning: Failed to load external injection metadata from '{}': {}".format(candidate_path, exc))
+        return None
 
 def parse_prior_bounds(config,option,default):
     '''
@@ -55,6 +87,26 @@ def parse_numeric_sequence(config, section, option, fallback=None):
     if isinstance(values, (int, float, np.integer, np.floating)):
         return float(values)
     return [float(value) for value in values]
+
+
+def parse_integer_sequence(config, section, option, fallback=None):
+    '''
+    Parse a config option containing either a scalar or a list/tuple of integers.
+    '''
+    if not config.has_section(section) or not config.has_option(section, option):
+        return fallback
+
+    values = eval(str(config.get(section, option)))
+    if values is None:
+        return fallback
+    if isinstance(values, (int, np.integer)):
+        return [int(values)]
+
+    parsed = [int(value) for value in values]
+    if len(parsed) == 0:
+        return []
+
+    return parsed
 
 def extract_final_log_evidence(logz, logzerr):
     '''
@@ -124,9 +176,15 @@ class LISA(LISAdata, Model):
         
         # Make some simple diagnostic plots to contrast spectra
         if self.params['load_data']:
-            self.plot_spectra()
+            if self.params.get('skip_diagnostics', 0):
+                print("Skipping loaded-data spectra plot because skip_diagnostics=1.")
+            else:
+                self.plot_spectra()
         else:
-            self.diag_spectra()
+            if self.params.get('skip_diagnostics', 0):
+                print("Skipping diagnostic injection plots because skip_diagnostics=1.")
+            else:
+                self.diag_spectra()
             
 
     def makedata(self):
@@ -461,6 +519,7 @@ def blip(paramsfile='params.ini',resume=False):
     params['nside'] = int(config.get("params", "nside"))
     params['lmax'] = int(config.get("params", "lmax"))
     params['multipole_l'] = int(config.get("params", "multipole_l", fallback=-1))
+    params['multipole_ls'] = parse_integer_sequence(config, "params", "multipole_ls", fallback=None)
     params['tstart'] = float(config.get("params", "tstart", fallback=0))
     params['prior_bounds'] = {'log_Np':parse_prior_bounds(config,'log_Np',[-44,-39]),
                               'log_Na':parse_prior_bounds(config,'log_Na',[-51,-46]),
@@ -491,6 +550,7 @@ def blip(paramsfile='params.ini',resume=False):
     if inj['doInj']:
         inj['injection'] = str(config.get("inj", "injection"))
         inj['multipole_l'] = int(config.get("inj", "multipole_l", fallback=params['multipole_l']))
+        inj['multipole_ls'] = parse_integer_sequence(config, "inj", "multipole_ls", fallback=params.get('multipole_ls', None))
         
         ## get the injection truevals, passed as a dict
         truevals = eval(str(config.get("inj","truevals")))
@@ -521,15 +581,20 @@ def blip(paramsfile='params.ini',resume=False):
         or ('hierarchical' in sph_check)
         or ('multipole' in sph_check)
         or ('relmultipole' in sph_check)
+        or ('relmultipoles' in sph_check)
     )
     inj['sph_flag'] = np.any([(item not in ['noise','isgwb']) for item in sph_check])
     inj['pop_flag'] = 'population' in sph_check
     
     if inj['doInj'] and inj['sph_flag']:
+        max_params_multipole = max(params['multipole_ls']) if params.get('multipole_ls') not in [None, []] else -1
+        max_inj_multipole = max(inj['multipole_ls']) if inj.get('multipole_ls') not in [None, []] else -1
         default_inj_lmax = max(
             params['lmax'],
             params.get('multipole_l', -1),
             inj.get('multipole_l', -1),
+            max_params_multipole,
+            max_inj_multipole,
         )
         try:
             inj['inj_lmax'] = int(config.get("inj", "inj_lmax"))
@@ -562,6 +627,9 @@ def blip(paramsfile='params.ini',resume=False):
     # some run parameters
     params['out_dir']            = str(config.get("run_params", "out_dir"))
     params['doPreProc']          = int(config.get("run_params", "doPreProc", fallback=0))
+    params['generate_only']      = int(config.get("run_params", "generate_only", fallback=0))
+    params['skip_diagnostics']   = int(config.get("run_params", "skip_diagnostics", fallback=0))
+    params['skip_postprocessing']= int(config.get("run_params", "skip_postprocessing", fallback=0))
     params['input_spectrum']     = str(config.get("run_params", "input_spectrum", fallback='data_spectrum.npz'))
     params['projection']         = str(config.get("run_params", "projection", fallback='E'))
     params['FixSeed']            = int(config.get("run_params", "FixSeed", fallback=0))
@@ -640,6 +708,9 @@ def blip(paramsfile='params.ini',resume=False):
                     del lisa.Injection.components[cmn].inj_response_mat
             with open(params['out_dir'] + '/injection.pickle', 'wb') as outfile:
                 pickle.dump(lisa.Injection, outfile)
+        if params['generate_only']:
+            print("Configured generate_only=1. Cached spectra and diagnostics are ready in {}. Skipping sampling.".format(params['out_dir']))
+            return
     else:
         print("Resuming a previous analysis. Reloading data and sampler state...")
 
@@ -745,16 +816,21 @@ def blip(paramsfile='params.ini',resume=False):
         pickle.dump(inj, outfile)
         pickle.dump(parameters, outfile)
 
+    if params['skip_postprocessing']:
+        print("Skipping posterior plots and fit products because skip_postprocessing=1.")
+        return
+
 
     print("\nMaking posterior Plots ...")
+    external_injection = load_reference_injection_for_postprocessing(params)
     if not params['load_data']:
         plotmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
     else:
-        plotmaker(post_samples, params, parameters, inj, lisa.Model)
+        plotmaker(post_samples, params, parameters, inj, lisa.Model, external_injection)
     if not params['load_data']:
         fitmaker(post_samples, params, parameters, inj, lisa.Model, lisa.Injection)
     else:
-        fitmaker(post_samples, params, parameters, inj, lisa.Model)
+        fitmaker(post_samples, params, parameters, inj, lisa.Model, external_injection)
     ## make a map if there is a map to be made
     if np.any([lisa.Model.submodels[sm_name].has_map for sm_name in lisa.Model.submodel_names]):
         if 'healpy_proj' in params.keys():
