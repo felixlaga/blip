@@ -36,3 +36,5 @@ build/*
 params_run*
 BLiP.egg-info
 blip.egg-info
+/.venv
+/.venv_sys
