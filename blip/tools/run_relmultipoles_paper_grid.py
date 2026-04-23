@@ -48,6 +48,12 @@ def parse_float_sequence(config, section, option, fallback=None):
     return [float(value) for value in values]
 
 
+def parse_bool_option(config, section, option, fallback=False):
+    if not config.has_section(section) or not config.has_option(section, option):
+        return bool(fallback)
+    return bool(int(config.get(section, option)))
+
+
 def set_option(config, section, option, value):
     if not config.has_section(section):
         config.add_section(section)
@@ -131,6 +137,11 @@ def build_analysis_aliases(model_string, injection_component_name):
 
 def format_ratio_label(ratio):
     return "ratio_{}".format("{:.3f}".format(ratio).replace(".", "p"))
+
+
+def enable_full_plot_products(config):
+    set_option(config, "run_params", "skip_diagnostics", 0)
+    set_option(config, "run_params", "skip_postprocessing", 0)
 
 
 def write_summary_files(out_dir, rows):
@@ -239,6 +250,12 @@ def main():
     ratio_grid = parse_float_sequence(base_config, "paper_grid", "a_ratio_grid", fallback=[])
     include_zero_baseline = bool(int(base_config.get("paper_grid", "include_zero_baseline", fallback="1")))
     seed_start = int(base_config.get("paper_grid", "seed_start", fallback="200"))
+    final_dataset_full_plots = parse_bool_option(
+        base_config,
+        "paper_grid",
+        "final_dataset_full_plots",
+        fallback=False,
+    )
 
     if len(ratio_grid) == 0 and not include_zero_baseline:
         raise ValueError("The paper grid must include at least one injected dataset.")
@@ -281,9 +298,12 @@ def main():
     summary_rows = []
     input_spectrum_name = Path(base_config.get("run_params", "input_spectrum", fallback="data_spectrum.npz")).name
 
+    last_dataset_label = dataset_specs[-1]["dataset_label"]
+
     for dataset in dataset_specs:
         dataset_label = dataset["dataset_label"]
         injected_ratio = float(dataset["ratio"])
+        is_final_dataset = dataset_label == last_dataset_label
         dataset_root = output_root / dataset_label
         shared_dir = dataset_root / "shared_data"
         null_dir = dataset_root / "null_model"
@@ -321,6 +341,8 @@ def main():
         set_option(shared_config, "run_params", "doPreProc", 1)
         set_option(shared_config, "run_params", "out_dir", str(shared_dir))
         set_option(shared_config, "run_params", "input_spectrum", input_spectrum_name)
+        if final_dataset_full_plots and is_final_dataset:
+            enable_full_plot_products(shared_config)
         shared_config_path = dataset_root / "shared_data.ini"
         write_config(shared_config, shared_config_path)
 
@@ -347,6 +369,8 @@ def main():
         set_option(null_config, "run_params", "doPreProc", 0)
         set_option(null_config, "run_params", "out_dir", str(null_dir))
         set_option(null_config, "run_params", "input_spectrum", str(shared_spectrum_path.resolve()))
+        if final_dataset_full_plots and is_final_dataset:
+            enable_full_plot_products(null_config)
         null_config_path = dataset_root / "null_model.ini"
         write_config(null_config, null_config_path)
 
@@ -368,6 +392,8 @@ def main():
         set_option(alt_config, "run_params", "doPreProc", 0)
         set_option(alt_config, "run_params", "out_dir", str(alt_dir))
         set_option(alt_config, "run_params", "input_spectrum", str(shared_spectrum_path.resolve()))
+        if final_dataset_full_plots and is_final_dataset:
+            enable_full_plot_products(alt_config)
         alt_config_path = dataset_root / "alt_model.ini"
         write_config(alt_config, alt_config_path)
 
