@@ -2,6 +2,8 @@
 *.png
 *.pdf
 test*
+!tests/
+!tests/test_sample_count_alignment.py
 *~
 R1array*
 R2array*
@@ -20,6 +22,8 @@ owndata*
 eogtest*
 bayesfactorplot*
 test*
+!tests/
+!tests/test_sample_count_alignment.py
 vectest*
 dwdfg_powerlaw_params.ini
 params-milky-way.ini

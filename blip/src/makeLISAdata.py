@@ -1,6 +1,8 @@
 import numpy as np
 import os
 
+from blip.src.utils import build_uniform_time_array_for_fs, resolve_sample_count_for_fs
+
 class LISAdata():
 
     '''
@@ -64,6 +66,72 @@ class LISAdata():
         tsegstart = self.params['tstart'] + self.params['seglen'] * np.arange(nsegs)
         tsegmid = tsegstart + 0.5 * self.params['seglen']
         return tsegstart, tsegmid
+
+    def resolve_sample_count(self, duration):
+
+        '''
+        Convert a duration to an integer sample count at the configured sample rate.
+
+        BLIP historically truncates partial samples. We preserve that behavior while
+        guarding against tiny floating-point roundoff when the true product is an
+        integer.
+        '''
+
+        return resolve_sample_count_for_fs(duration, self.params['fs'])
+
+    def get_requested_num_samples(self):
+
+        '''
+        Return the exact number of time-domain samples BLIP should generate.
+        '''
+
+        requested_samples = self.resolve_sample_count(self.params['dur'])
+        if requested_samples <= 0:
+            raise ValueError(
+                "Requested duration {} at fs={} produces no time-domain samples."
+                .format(self.params['dur'], self.params['fs'])
+            )
+        return requested_samples
+
+    def build_uniform_time_array(self, nsamples, tbreak=0.0):
+
+        '''
+        Build a uniformly sampled time array from an explicit sample count.
+        '''
+
+        return build_uniform_time_array_for_fs(
+            self.params['fs'],
+            nsamples,
+            tstart=self.params['tstart'],
+            tbreak=tbreak,
+        )
+
+    def compute_half_overlap_splice_setup(self, nominal_tsplice):
+
+        '''
+        Return splice parameters that guarantee at least the requested sample coverage.
+
+        The SGWB overlap-add path advances by half a splice at a time, so the number
+        of splices is determined from the requested sample count and the half-splice
+        step size.
+        '''
+
+        Npersplice = self.resolve_sample_count(nominal_tsplice)
+        if Npersplice < 2:
+            raise ValueError(
+                "Splice duration {} at fs={} is too short to build overlap-add segments."
+                .format(nominal_tsplice, self.params['fs'])
+            )
+
+        # Half-overlap splicing requires an integer half-splice length.
+        if np.mod(Npersplice, 2) != 0:
+            Npersplice += 1
+
+        halfN = Npersplice // 2
+        requested_samples = self.get_requested_num_samples()
+        nsplice = int(np.ceil(float(requested_samples) / float(halfN))) + 1
+
+        return Npersplice, halfN, nsplice
 
     def compute_covariance_square_root(self, covariance_stack):
 
@@ -220,7 +288,15 @@ class LISAdata():
         ## remove the first half and the last half splice.
         h1, h2, h3 = h1[halfN:-halfN], h2[halfN:-halfN], h3[halfN:-halfN]
 
-        tarr = self.params['tstart'] + tbreak +  np.arange(0, self.params['dur'], 1.0/self.params['fs'])
+        requested_samples = self.get_requested_num_samples()
+        if h1.size < requested_samples or h2.size < requested_samples or h3.size < requested_samples:
+            raise ValueError(
+                "SGWB splice construction produced {} / {} / {} samples for '{}' but {} were requested."
+                .format(h1.size, h2.size, h3.size, injmodel.name, requested_samples)
+            )
+
+        h1, h2, h3 = h1[:requested_samples], h2[:requested_samples], h3[:requested_samples]
+        tarr = self.build_uniform_time_array(requested_samples, tbreak=tbreak)
 
         return h1, h2, h3, tarr
 

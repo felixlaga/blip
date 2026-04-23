@@ -2,6 +2,8 @@ from __future__ import division
 import numpy as np
 from scipy.interpolate import interp1d as intrp
 
+from blip.src.utils import build_uniform_time_array_for_fs, resolve_sample_count_for_fs
+
 class instrNoise():
 
     '''
@@ -357,7 +359,7 @@ class instrNoise():
         '''
 
         fstar = 3e8/(2*np.pi*self.armlength)
-        N = int(self.params['fs']*self.params['dur'])
+        N = resolve_sample_count_for_fs(self.params['dur'], self.params['fs'])
 
         frange = np.fft.rfftfreq(N, 1.0/self.params['fs'])[1:]
         frange = frange[frange <= self.params['fmax']]
@@ -392,7 +394,7 @@ class instrNoise():
         h2 = np.fft.irfft(htilda2, N)
         h3 = np.fft.irfft(htilda3, N)
 
-        tarr =  np.arange(0, self.params['dur'], 1.0/self.params['fs'])
+        tarr = build_uniform_time_array_for_fs(self.params['fs'], N)
 
 
         return tarr, h1, h2, h3

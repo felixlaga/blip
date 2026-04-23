@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 from contextlib import contextmanager
 
 
@@ -7,6 +8,33 @@ from contextlib import contextmanager
 utils.py contains a collection of ragtag miscellaneous utility functions. If you don't know where to put something, it's always welcome here <3
 
 '''
+
+
+def resolve_sample_count_for_fs(duration, fs):
+    '''
+    Convert a duration to an integer sample count at a given sample rate.
+
+    When the mathematical product duration * fs is an integer but floating-point
+    arithmetic nudges it slightly off, snap back to the nearest integer instead
+    of silently dropping a sample.
+    '''
+
+    sample_count = float(duration) * float(fs)
+    rounded_count = int(np.rint(sample_count))
+    tolerance = 1e-12 * max(1.0, abs(sample_count))
+
+    if abs(sample_count - rounded_count) <= tolerance:
+        return rounded_count
+
+    return int(np.floor(sample_count))
+
+
+def build_uniform_time_array_for_fs(fs, nsamples, tstart=0.0, tbreak=0.0):
+    '''
+    Build a uniformly sampled time array from an explicit sample count.
+    '''
+
+    return float(tstart) + float(tbreak) + np.arange(int(nsamples), dtype=float) / float(fs)
 
 
 ## Some helper functions for Models, Injections, and submodels.
@@ -56,6 +84,8 @@ def gen_suffixes(names):
                  'isgwb':{'abbrv':'I','count':1},
                  'sph':{'abbrv':'A','count':1},
                  'multipole':{'abbrv':'L','count':1},
+                 'absmultipole':{'abbrv':'AL','count':1},
+                 'absmultipoles':{'abbrv':'AM','count':1},
                  'relmultipole':{'abbrv':'R','count':1},
                  'relmultipoles':{'abbrv':'RM','count':1},
                  'population':{'abbrv':'P','count':1},

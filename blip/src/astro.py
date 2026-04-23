@@ -4,6 +4,7 @@ import pandas as pd
 from blip.src.instrNoise import instrNoise
 from blip.src.geometry import geometry
 from blip.src.sph_geometry import sph_geometry
+from blip.src.utils import resolve_sample_count_for_fs
 from scipy.interpolate import interp1d as intrp
 import matplotlib.pyplot as plt
 import healpy as hp
@@ -38,10 +39,16 @@ class Population():
         self.PSD= self.pop2spec(pop,self.frange,self.params['dur']*u.s,return_median=False,plot=False)
 
         ## PSD at data frequencies
-        fs_spec = np.fft.rfftfreq(int(self.params['fs']*self.params['dur']),1/self.params['fs'])[1:]
+        fs_spec = np.fft.rfftfreq(
+            resolve_sample_count_for_fs(self.params['dur'], self.params['fs']),
+            1 / self.params['fs'],
+        )[1:]
         PSD_spec = self.pop2spec(pop,fs_spec,self.params['dur']*u.s,return_median=False,plot=False)
         self.PSD_interp = intrp(fs_spec,PSD_spec)
-        self.fftfreqs = np.fft.rfftfreq(int(self.params['fs']*self.params['seglen']),1/self.params['fs'])[1:]
+        self.fftfreqs = np.fft.rfftfreq(
+            resolve_sample_count_for_fs(self.params['seglen'], self.params['fs']),
+            1 / self.params['fs'],
+        )[1:]
         self.frange_true = self.fftfreqs[np.logical_and(self.fftfreqs >=  self.params['fmin'] , self.fftfreqs <=  self.params['fmax'])]
         self.PSD_true = self.PSD_interp(self.frange_true)
 
