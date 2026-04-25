@@ -430,24 +430,53 @@ def run_full_dataset_absolute_grid(base_config_path, base_config, output_root, a
         if target_multipole_l in active_log_a_by_l:
             active_log_a_by_l[target_multipole_l] = float(np.log10(injected_a2))
 
-        shared_component_truevals["log_A_L_by_L"] = active_log_a_by_l
-        shared_component_truevals.pop("A_L_by_L", None)
-        shared_component_truevals.pop("log_A_Ls", None)
-        shared_component_truevals.pop("A_Ls", None)
-        shared_truevals[injection_component_name] = shared_component_truevals
+        if len(active_multipole_ls) == 0:
+            isotropic_truevals = copy.deepcopy(component_truevals)
+            for multipole_key in [
+                "log_A_L",
+                "A_L",
+                "log_A_Ls",
+                "A_Ls",
+                "log_A_L_by_L",
+                "A_L_by_L",
+            ]:
+                isotropic_truevals.pop(multipole_key, None)
+            shared_truevals = {
+                "noise": copy.deepcopy(raw_truevals["noise"]),
+                "powerlaw_isgwb": isotropic_truevals,
+            }
 
-        shared_lmax = max(active_multipole_ls) if len(active_multipole_ls) > 0 else target_multipole_l
+            set_option(shared_config, "params", "model", "noise+powerlaw_isgwb")
+            set_option(shared_config, "params", "alias", repr({}))
+            set_option(shared_config, "params", "load_data", 0)
+            set_option(shared_config, "params", "lmax", target_multipole_l)
+            remove_option(shared_config, "params", "multipole_l")
+            remove_option(shared_config, "params", "multipole_ls")
+            set_option(shared_config, "inj", "doInj", 1)
+            set_option(shared_config, "inj", "injection", "noise+powerlaw_isgwb")
+            remove_option(shared_config, "inj", "inj_lmax")
+            remove_option(shared_config, "inj", "multipole_l")
+            remove_option(shared_config, "inj", "multipole_ls")
+            set_option(shared_config, "inj", "truevals", repr(shared_truevals))
+        else:
+            shared_component_truevals["log_A_L_by_L"] = active_log_a_by_l
+            shared_component_truevals.pop("A_L_by_L", None)
+            shared_component_truevals.pop("log_A_Ls", None)
+            shared_component_truevals.pop("A_Ls", None)
+            shared_truevals[injection_component_name] = shared_component_truevals
 
-        set_option(shared_config, "params", "model", "noise+powerlaw_absmultipoles")
-        set_option(shared_config, "params", "alias", repr({"powerlaw_absmultipoles": injection_component_name}))
-        set_option(shared_config, "params", "load_data", 0)
-        set_option(shared_config, "params", "lmax", shared_lmax)
-        set_option(shared_config, "params", "multipole_ls", repr(active_multipole_ls))
-        set_option(shared_config, "inj", "doInj", 1)
-        set_option(shared_config, "inj", "injection", "noise+powerlaw_absmultipoles")
-        set_option(shared_config, "inj", "inj_lmax", shared_lmax)
-        set_option(shared_config, "inj", "multipole_ls", repr(active_multipole_ls))
-        set_option(shared_config, "inj", "truevals", repr(shared_truevals))
+            shared_lmax = max(active_multipole_ls)
+
+            set_option(shared_config, "params", "model", "noise+powerlaw_absmultipoles")
+            set_option(shared_config, "params", "alias", repr({"powerlaw_absmultipoles": injection_component_name}))
+            set_option(shared_config, "params", "load_data", 0)
+            set_option(shared_config, "params", "lmax", shared_lmax)
+            set_option(shared_config, "params", "multipole_ls", repr(active_multipole_ls))
+            set_option(shared_config, "inj", "doInj", 1)
+            set_option(shared_config, "inj", "injection", "noise+powerlaw_absmultipoles")
+            set_option(shared_config, "inj", "inj_lmax", shared_lmax)
+            set_option(shared_config, "inj", "multipole_ls", repr(active_multipole_ls))
+            set_option(shared_config, "inj", "truevals", repr(shared_truevals))
         set_option(shared_config, "run_params", "FixSeed", 1)
         set_option(shared_config, "run_params", "seed", dataset["seed"])
         set_option(shared_config, "run_params", "generate_only", 1)
